@@ -1,8 +1,8 @@
 (defproject jepsen.tendermint "0.1.0-SNAPSHOT"
   :description "Jepsen tests for the Tendermint Byzantine consensus system"
   :url "http://github.com/jepsen-io/tendermint"
-  :license {:name "Eclipse Public License"
-            :url "http://www.eclipse.org/legal/epl-v10.html"}
+  :license {:name "Apache License, version 2.0"
+            :url "https://www.apache.org/licenses/LICENSE-2.0"}
   :dependencies [[org.clojure/clojure "1.8.0"]
                  [cheshire "5.7.1"]
                  [slingshot "0.12.2"]
