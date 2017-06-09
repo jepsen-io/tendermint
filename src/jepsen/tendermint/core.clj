@@ -175,20 +175,29 @@
        (client node))
 
      (invoke! [_ test op]
-       (try+
-         (case (:f op)
-           :read  (assoc op :type :ok :value (tc/read node "key"))
-           :write (do (tc/write! node "key" (:value op))
-                      (assoc op :type :ok))
-           :cas   (let [[v v'] (:value op)]
-                    (tc/cas! node "key" v v')
-                    (assoc op :type :ok)))
+       (let [[k v] (:value op)
+             crash (if (= (:f op) :read)
+                     :fail
+                     :info)]
+         (try+
+           (case (:f op)
+             :read  (assoc op
+                           :type :ok
+                           :value (independent/tuple k (tc/read node k)))
+             :write (do (tc/write! node k v)
+                        (assoc op :type :ok))
+             :cas   (let [[v v'] v]
+                      (tc/cas! node k v v')
+                      (assoc op :type :ok)))
 
-         (catch [:type :unauthorized] e
-           (assoc op :type :fail, :error :precondition-failed))
+           (catch [:type :unauthorized] e
+             (assoc op :type :fail, :error :precondition-failed))
 
-         (catch [:type :base-unknown-address] e
-           (assoc op :type :fail, :error :not-found))))
+           (catch [:type :base-unknown-address] e
+             (assoc op :type :fail, :error :not-found))
+
+           (catch java.net.SocketTimeoutException e
+             (assoc op :type crash, :error :timeout)))))
 
      (teardown! [_ test]))))
 
@@ -198,25 +207,34 @@
 
 (defn test
   [opts]
-  (merge tests/noop-test
-         opts
-         {:name "tendermint"
-          :os   debian/os
-          :nonserializable-keys [:pub-keys]
-          :pub-keys (->> (:nodes opts)
-                         (map (fn [node] [node (promise)]))
-                         (into {}))
-          :db   (db {:versions {:tendermint "0.10.0"
-                                :abci       "0.5.0"
-                                :merkleeyes "0.2.2"}})
-          :client (client)
-          :generator (->> (gen/mix [r w cas])
-                          (gen/stagger 10)
-                          (gen/clients)
-                          (gen/time-limit 30))
-          :model   (model/cas-register)
-          :checker (checker/compose
-                     {:linear   (checker/linearizable)
-                      :timeline (timeline/html)
-                      :perf     (checker/perf)})
-          }))
+  (let [n (count (:nodes opts))]
+    (merge tests/noop-test
+           opts
+           {:name "tendermint"
+            :os   debian/os
+            :nonserializable-keys [:pub-keys]
+            :pub-keys (->> (:nodes opts)
+                           (map (fn [node] [node (promise)]))
+                           (into {}))
+            :db   (db {:versions {:tendermint "0.10.0"
+                                  :abci       "0.5.0"
+                                  :merkleeyes "0.2.2"}})
+            :client (client)
+            :generator (->> (independent/concurrent-generator
+                              (* 2 n)
+                              (range)
+                              (fn [k]
+                                (->> (gen/mix [w cas])
+                                     (gen/reserve n r)
+                                     (gen/stagger 1/2)
+                                     (gen/limit 100))))
+                            (gen/nemesis
+                              (gen/start-stop 20 20))
+                            (gen/time-limit (:time-limit opts)))
+            :nemesis (nemesis/partition-random-halves)
+            :model   (model/cas-register)
+            :checker (checker/compose
+                       {:linear   (independent/checker (checker/linearizable))
+                        :timeline (independent/checker   (timeline/html))
+                        :perf     (checker/perf)})
+            })))
