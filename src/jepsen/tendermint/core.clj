@@ -1,6 +1,7 @@
 (ns jepsen.tendermint.core
   (:refer-clojure :exclude [test])
   (:require [clojure.tools.logging :refer :all]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.pprint :refer [pprint]]
             [knossos.model :as model]
@@ -75,6 +76,14 @@
                   :> "genesis.json")
           (info "Wrote genesis.json"))))
 
+(defn write-config!
+  "Writes out a config.toml file to the current node."
+  []
+  (c/su
+    (c/cd base-dir
+          (c/exec :echo (slurp (io/resource "config.toml"))
+                  :> "config.toml"))))
+
 (defn seeds
   "Constructs a --seeds command line for a test, so a tendermint node knows
   what other nodes to talk to."
@@ -139,15 +148,18 @@
   (reify db/DB
     (setup! [_ test node]
       (c/su
-        (install-component! "tendermint"  opts)
+        ; (install-component! "tendermint"  opts)
         (install-component! "abci"        opts)
         ; (install-component! "merkleeyes"  opts)
         (c/cd base-dir
-              (c/exec :wget "https://s3-us-west-2.amazonaws.com/tendermint/merkleeyes")
+              (c/exec :wget "https://s3-us-west-2.amazonaws.com/tendermint/jepsen/tendermint")
+              (c/exec :chmod "+x" "tendermint")
+              (c/exec :wget "https://s3-us-west-2.amazonaws.com/tendermint/jepsen/merkleeyes")
               (c/exec :chmod "+x" "merkleeyes"))
 
         (gen-validator! test node)
         (gen-genesis!   test)
+        (write-config!)
 
         (start-merkleeyes!)
         (start-tendermint! test node)
@@ -202,8 +214,8 @@
      (teardown! [_ test]))))
 
 (defn r   [_ _] {:type :invoke, :f :read,  :value nil})
-(defn w   [_ _] {:type :invoke, :f :write, :value (rand-int 5)})
-(defn cas [_ _] {:type :invoke, :f :cas,   :value [(rand-int 5) (rand-int 5)]})
+(defn w   [_ _] {:type :invoke, :f :write, :value (rand-int 10)})
+(defn cas [_ _] {:type :invoke, :f :cas,   :value [(rand-int 10) (rand-int 10)]})
 
 (defn test
   [opts]
@@ -229,9 +241,9 @@
                                      (gen/stagger 1/2)
                                      (gen/limit 100))))
                             (gen/nemesis
-                              (gen/start-stop 20 20))
+                              (gen/start-stop 5 30))
                             (gen/time-limit (:time-limit opts)))
-            :nemesis (nemesis/partition-random-halves)
+            :nemesis (nemesis/partition-random-node)
             :model   (model/cas-register)
             :checker (checker/compose
                        {:linear   (independent/checker (checker/linearizable))
