@@ -210,6 +210,9 @@
            (catch [:type :base-unknown-address] e
              (assoc op :type :fail, :error :not-found))
 
+           (catch java.net.ConnectException e
+             (assoc op :type :fail, :error :connection-refused))
+
            (catch java.net.SocketTimeoutException e
              (assoc op :type crash, :error :timeout)))))
 
