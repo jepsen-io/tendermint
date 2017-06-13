@@ -8,7 +8,7 @@
                  [slingshot "0.12.2"]
                  [clj-http "3.6.1"]
                  [jepsen "0.1.6-SNAPSHOT"]]
-  :jvm-opts ["-Xmx12g"
+  :jvm-opts ["-Xmx6g"
              "-XX:+UseConcMarkSweepGC"
              "-XX:+UseParNewGC"
              "-XX:+CMSParallelRemarkEnabled"

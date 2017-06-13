@@ -17,6 +17,7 @@
              [tests :as tests]
              [util :as util :refer [timeout map-vals]]]
             [jepsen.checker.timeline :as timeline]
+            [jepsen.nemesis.time :as nt]
             [jepsen.control.util :as cu]
             [jepsen.os.debian :as debian]
             [cheshire.core :as json]
@@ -164,8 +165,9 @@
         (start-merkleeyes!)
         (start-tendermint! test node)
 
-        (Thread/sleep 10000)))
+        (nt/install!)
 
+        (Thread/sleep 1000)))
 
     (teardown! [_ test node]
       (stop-merkleeyes!)
@@ -217,12 +219,28 @@
 (defn w   [_ _] {:type :invoke, :f :write, :value (rand-int 10)})
 (defn cas [_ _] {:type :invoke, :f :cas,   :value [(rand-int 10) (rand-int 10)]})
 
+(defn nemesis
+  "The generator and nemesis for each nemesis profile"
+  [opts]
+  (case (:nemesis opts)
+    :half-partitions {:nemesis   (nemesis/partition-random-halves)
+                      :generator (gen/start-stop 5 15)}
+    :ring-partitions {:nemesis (nemesis/partition-majorities-ring)
+                      :generator (gen/start-stop 5 15)}
+    :single-partitions {:nemesis (nemesis/partition-random-node)
+                        :generator (gen/start-stop 5 15)}
+    :clocks     {:nemesis   (nt/clock-nemesis)
+                 :generator (gen/stagger 5 (nt/clock-gen))}
+    :none       {:nemesis   (client/noop)
+                 :generator gen/void}))
+
 (defn test
   [opts]
-  (let [n (count (:nodes opts))]
+  (let [n       (count (:nodes opts))
+        nemesis (nemesis opts)]
     (merge tests/noop-test
            opts
-           {:name "tendermint"
+           {:name (str "tendermint " (name (:nemesis opts)))
             :os   debian/os
             :nonserializable-keys [:pub-keys]
             :pub-keys (->> (:nodes opts)
@@ -240,13 +258,11 @@
                                      (gen/reserve n r)
                                      (gen/stagger 1/2)
                                      (gen/limit 100))))
-                            (gen/nemesis
-                              (gen/start-stop 5 30))
+                            (gen/nemesis (:generator nemesis))
                             (gen/time-limit (:time-limit opts)))
-            :nemesis (nemesis/partition-random-node)
+            :nemesis (:nemesis nemesis)
             :model   (model/cas-register)
             :checker (checker/compose
                        {:linear   (independent/checker (checker/linearizable))
                         :timeline (independent/checker   (timeline/html))
-                        :perf     (checker/perf)})
-            })))
+                        :perf     (checker/perf)})})))

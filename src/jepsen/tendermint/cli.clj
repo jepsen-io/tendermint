@@ -5,8 +5,15 @@
             [jepsen [cli :as jc]]
             [jepsen.tendermint [core :as core]]))
 
+(def opts
+  "Extra command line opts."
+  [[nil "--nemesis NEMESIS" "Nemesis to use; e.g. clocks"
+   :default :none
+   :parse-fn keyword]])
+
 (defn -main
   [& args]
   (jc/run! (merge (jc/serve-cmd)
-                  (jc/single-test-cmd {:test-fn core/test}))
+                  (jc/single-test-cmd {:test-fn core/test
+                                       :opt-spec opts}))
           args))
