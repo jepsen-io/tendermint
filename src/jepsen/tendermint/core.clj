@@ -227,14 +227,14 @@
   [opts]
   (case (:nemesis opts)
     :half-partitions {:nemesis   (nemesis/partition-random-halves)
-                      :generator (gen/start-stop 5 15)}
+                      :generator (gen/start-stop 5 30)}
     :ring-partitions {:nemesis (nemesis/partition-majorities-ring)
-                      :generator (gen/start-stop 5 15)}
+                      :generator (gen/start-stop 5 30)}
     :single-partitions {:nemesis (nemesis/partition-random-node)
-                        :generator (gen/start-stop 5 15)}
+                        :generator (gen/start-stop 5 30)}
     :clocks     {:nemesis   (nt/clock-nemesis)
                  :generator (gen/stagger 5 (nt/clock-gen))}
-    :none       {:nemesis   (client/noop)
+    :none       {:nemesis   client/noop
                  :generator gen/void}))
 
 (defn test
