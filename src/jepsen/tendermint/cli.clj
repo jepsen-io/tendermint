@@ -9,7 +9,8 @@
   "Extra command line opts."
   [[nil "--nemesis NEMESIS" "Nemesis to use; e.g. clocks"
    :default :none
-   :parse-fn keyword]])
+   :parse-fn keyword]
+   [nil "--dup-validators" "Whether to have multiple validators share the same key."]])
 
 (defn -main
   [& args]

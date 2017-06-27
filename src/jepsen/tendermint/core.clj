@@ -44,11 +44,17 @@
             (json/parse-string true))))
 
 (defn gen-validator!
-  "Generates a validator for the current node, writes it to validator.json, and
-  registers the public key in the test map."
+  "Generates a validator for the current node (or, if this validator is a dup,
+  waits for the appropriate validator to be ready and clones its keys), then
+  writes out a validator.json, and registers the keys in the test map."
   [test node]
-  (let [validator (gen-validator)]
-    (deliver (get-in test [:pub-keys node]) (:pub_key validator))
+  (let [validator (if-let [orig (get (:dup-validators test) node)]
+                    ; Copy from orig's keys
+                    (do (info node "copying" orig "validator key")
+                        @(get-in test [:validators orig]))
+                    ; Generate a fresh one
+                    (gen-validator))]
+    (deliver (get-in test [:validators node]) validator)
     (c/su
       (c/cd base-dir
             (c/exec :echo (json/generate-string validator)
@@ -62,11 +68,17 @@
   {:app_hash      ""
    :chain_id      "jepsen"
    :genesis_time  "0001-01-01T00:00:00.000Z"
-   :validators    (map (fn [[node pub-key]]
-                         {:amount  10
-                          :name    node
-                          :pub_key @pub-key})
-                       (:pub-keys test))})
+   :validators    (->> (:validators test)
+                       (reduce (fn [validators [node validator]]
+                                 (let [pub-key (:pub_key @validator)]
+                                   (if (some #(= pub-key (:pub_key %))
+                                             validators)
+                                     validators
+                                     (conj validators
+                                           {:amount  10
+                                            :name    node
+                                            :pub_key pub-key}))))
+                               []))})
 
 (defn gen-genesis!
   "Generates a new genesis file and writes it to disk."
@@ -178,6 +190,8 @@
     db/LogFiles
     (log-files [_ test node]
       [tendermint-logfile
+       (str base-dir "/validator.json")
+       (str base-dir "/genesis.json")
        merkleeyes-logfile])))
 
 (defn client
@@ -222,10 +236,48 @@
 (defn w   [_ _] {:type :invoke, :f :write, :value (rand-int 10)})
 (defn cas [_ _] {:type :invoke, :f :cas,   :value [(rand-int 10) (rand-int 10)]})
 
+(defn dup-groups
+  "Takes a test with a :dup-validators map of nodes to the nodes they imitate,
+  and turns that into a collection of collections of nodes, each of which is
+  several nodes pretending to be the same node."
+  [test]
+  (let [dv (:dup-validators test)]
+    (->> (:nodes test)
+         (reduce (fn [index node]
+                   (let [orig (get dv node node)
+                         coll (get index orig #{})]
+                     (assoc index orig (conj coll node))))
+                 {})
+         vals)))
+
+(defn dup-validators-grudge
+  "Takes a test. Returns a function which takes a collection of nodes from that
+  test, and constructs a network partition (a grudge) which isolates some dups
+  completely, and leaves one connected to the majority component."
+  [test]
+  (let [groups  (dup-groups test)
+        singles (filter #(= 1 (count %)) groups)
+        dups    (filter #(< 1 (count %)) groups)]
+    (fn [nodes]
+      ; Pick one random node from every group of dups to participate in the
+      ; main component, and compute the remaining complement for each dup
+      ; group.
+      (let [chosen-ones (map (comp hash-set rand-nth vec) dups)
+            exiles      (map remove chosen-ones dups)]
+        (nemesis/complete-grudge
+          (cons ; Main group
+                (set (concat (apply concat singles)
+                             (apply concat chosen-ones)))
+                ; Exiles
+                exiles))))))
+
 (defn nemesis
   "The generator and nemesis for each nemesis profile"
-  [opts]
-  (case (:nemesis opts)
+  [test]
+  (case (:nemesis test)
+    :twofaced-validators {:nemesis (nemesis/partitioner
+                                     (dup-validators-grudge test))
+                          :generator (gen/start-stop 0 5)}
     :half-partitions {:nemesis   (nemesis/partition-random-halves)
                       :generator (gen/start-stop 5 30)}
     :ring-partitions {:nemesis (nemesis/partition-majorities-ring)
@@ -237,35 +289,55 @@
     :none       {:nemesis   client/noop
                  :generator gen/void}))
 
+(defn dup-validators
+  "Takes a test. Constructs a map of nodes to the nodes whose validator keys
+  they use instead of their own. If a node has no entry in the map, it
+  generates its own validator key."
+  [test]
+  (if (:dup-validators test)
+    ; We need fewer than 1/3.
+    (let [nodes           (:nodes test)
+          [orig & clones] (take (Math/floor (/ (count nodes) 3.01))
+                                (shuffle nodes))]
+      (zipmap clones (repeat orig)))))
+
 (defn test
   [opts]
   (let [n       (count (:nodes opts))
-        nemesis (nemesis opts)]
-    (merge tests/noop-test
-           opts
-           {:name (str "tendermint " (name (:nemesis opts)))
-            :os   debian/os
-            :nonserializable-keys [:pub-keys]
-            :pub-keys (->> (:nodes opts)
-                           (map (fn [node] [node (promise)]))
-                           (into {}))
-            :db   (db {:versions {:tendermint "0.10.0"
-                                  :abci       "0.5.0"
-                                  :merkleeyes "0.2.2"}})
-            :client (client)
-            :generator (->> (independent/concurrent-generator
-                              (* 2 n)
-                              (range)
-                              (fn [k]
-                                (->> (gen/mix [w cas])
-                                     (gen/reserve n r)
-                                     (gen/stagger 1/2)
-                                     (gen/limit 100))))
-                            (gen/nemesis (:generator nemesis))
-                            (gen/time-limit (:time-limit opts)))
-            :nemesis (:nemesis nemesis)
-            :model   (model/cas-register)
-            :checker (checker/compose
-                       {:linear   (independent/checker (checker/linearizable))
-                        :timeline (independent/checker   (timeline/html))
-                        :perf     (checker/perf)})})))
+        checker (checker/compose
+                  {:linear   (independent/checker (checker/linearizable))
+                   :timeline (independent/checker (timeline/html))
+                   :perf     (checker/perf)})
+        test (merge
+               tests/noop-test
+               opts
+               {:name (str "tendermint " (name (:nemesis opts)))
+                :os   debian/os
+                :nonserializable-keys [:validators]
+                ; A map of validator nodes to the nodes whose keys they use
+                ; instead of their own.
+                :dup-validators (dup-validators opts)
+                ; Map of node names to validator data structures, including keys
+                :validators (->> (:nodes opts)
+                                 (map (fn [node] [node (promise)]))
+                                 (into {}))
+                :db       (db {:versions {:tendermint "0.10.0"
+                                          :abci       "0.5.0"
+                                          :merkleeyes "0.2.2"}})
+                :client   (client)
+                :model    (model/cas-register)
+                :checker  checker})
+        nemesis (nemesis test)
+        test    (merge test
+                       {:generator (->> (independent/concurrent-generator
+                                          (* 2 n)
+                                          (range)
+                                          (fn [k]
+                                            (->> (gen/mix [w cas])
+                                                 (gen/reserve n r)
+                                                 (gen/stagger 1/2)
+                                                 (gen/limit 100))))
+                                        (gen/nemesis (:generator nemesis))
+                                        (gen/time-limit (:time-limit opts)))
+                        :nemesis (:nemesis nemesis)})]
+    test))
