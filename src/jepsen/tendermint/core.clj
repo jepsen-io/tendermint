@@ -321,10 +321,12 @@
   generates its own validator key."
   [test]
   (if (:dup-validators test)
-    ; We need fewer than 1/3.
-    (let [[orig & clones] (take (Math/floor (/ (count (:nodes test)) 3.01))
-                                (:nodes test))]
+    (let [[orig & clones] (take 2 (:nodes test))]
       (zipmap clones (repeat orig)))))
+    ; We need fewer than 1/3.
+    ; (let [[orig & clones] (take (Math/floor (/ (count (:nodes test)) 3.01))
+    ;                             (:nodes test))]
+    ;   (zipmap clones (repeat orig)))))
 
 (defn validator-weights
   "Takes a test. Computes a map of node names to voting amounts. When
