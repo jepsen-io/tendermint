@@ -65,20 +65,21 @@
   "Generate a new genesis structure for a test. Blocks until all pubkeys are
   available."
   [test]
-  {:app_hash      ""
-   :chain_id      "jepsen"
-   :genesis_time  "0001-01-01T00:00:00.000Z"
-   :validators    (->> (:validators test)
-                       (reduce (fn [validators [node validator]]
-                                 (let [pub-key (:pub_key @validator)]
-                                   (if (some #(= pub-key (:pub_key %))
-                                             validators)
-                                     validators
-                                     (conj validators
-                                           {:amount  10
-                                            :name    node
-                                            :pub_key pub-key}))))
-                               []))})
+  (let [weights (:validator-weights test)]
+    {:app_hash      ""
+     :chain_id      "jepsen"
+     :genesis_time  "0001-01-01T00:00:00.000Z"
+     :validators    (->> (:validators test)
+                         (reduce (fn [validators [node validator]]
+                                   (let [pub-key (:pub_key @validator)]
+                                     (if (some #(= pub-key (:pub_key %))
+                                               validators)
+                                       validators
+                                       (conj validators
+                                             {:amount  (get weights node)
+                                              :name    node
+                                              :pub_key pub-key}))))
+                                 []))}))
 
 (defn gen-genesis!
   "Generates a new genesis file and writes it to disk."
@@ -190,17 +191,22 @@
     db/LogFiles
     (log-files [_ test node]
       [tendermint-logfile
-       (str base-dir "/validator.json")
+       merkleeyes-logfile
+       (str base-dir "/priv_validator.json")
        (str base-dir "/genesis.json")
-       merkleeyes-logfile])))
+       ])))
 
-(defn client
+(defn r   [_ _] {:type :invoke, :f :read,  :value nil})
+(defn w   [_ _] {:type :invoke, :f :write, :value (rand-int 10)})
+(defn cas [_ _] {:type :invoke, :f :cas,   :value [(rand-int 10) (rand-int 10)]})
+
+(defn cas-register-client
   ([]
-   (client nil))
+   (cas-register-client nil))
   ([node]
    (reify client/Client
      (setup! [_ test node]
-       (client node))
+       (cas-register-client node))
 
      (invoke! [_ test op]
        (let [[k v] (:value op)
@@ -232,9 +238,21 @@
 
      (teardown! [_ test]))))
 
-(defn r   [_ _] {:type :invoke, :f :read,  :value nil})
-(defn w   [_ _] {:type :invoke, :f :write, :value (rand-int 10)})
-(defn cas [_ _] {:type :invoke, :f :cas,   :value [(rand-int 10) (rand-int 10)]})
+
+(defn set-client
+  ([]
+   (set-client nil))
+  ([node]
+   (reify client/Client
+     (setup! [_ test node]
+       (set-client node))
+
+     (invoke! [_ test op]
+       (let [[k v] (:value op)]
+         (try+
+           (case (:f op)
+             ; WIP
+             )))))))
 
 (defn dup-groups
   "Takes a test with a :dup-validators map of nodes to the nodes they imitate,
@@ -296,10 +314,43 @@
   [test]
   (if (:dup-validators test)
     ; We need fewer than 1/3.
-    (let [nodes           (:nodes test)
-          [orig & clones] (take (Math/floor (/ (count nodes) 3.01))
-                                (shuffle nodes))]
+    (let [[orig & clones] (take (Math/floor (/ (count (:nodes test)) 3.01))
+                                (:nodes test))]
       (zipmap clones (repeat orig)))))
+
+(defn validator-weights
+  "Takes a test. Computes a map of node names to voting amounts. When
+  dup-validators are involved, allocates just shy of 2/3 votes to the
+  duplicated key, assuming there's exactly one dup key."
+  [test]
+  (let [dup-vals (:dup-validators test)]
+    (if (seq dup-vals)
+      (let [groups  (dup-groups test)
+            singles (filter #(= 1 (count %)) groups)
+            dups    (filter #(< 1 (count %)) groups)
+            n       (count groups)]
+        (assert (= 1 (count dups))
+                "Don't know how to handle more than one dup validator key")
+        ; The sum of the normal nodes weights should be just over 1/3, so
+        ; that the remaining node can make up just under 2/3rds of the votes
+        ; by itself. Let a normal node's weight be 2. Then 2(n-1) is the
+        ; combined voting power of the normal bloc. We can then choose
+        ; 4(n-1) - 1 as the weight for the dup validator. The total votes
+        ; are
+        ;
+        ;    2(n-1) + 4(n-1) - 1
+        ;  = 6(n-1) - 1
+        ;
+        ; which implies a single dup node has fraction...
+        ;
+        ;    (4(n-1) - 1) / (6(n-1) - 1)
+        ;
+        ; which approaches 2/3 from 0 for n = 1 -> infinity, and if a single
+        ; regular node is added to a duplicate node, a 2/3+ majority is
+        ; available for all n >= 1.
+        (merge (zipmap (apply concat singles) (repeat 2))
+               (zipmap (first dups) (repeat (dec (* 4 (dec n)))))))
+      (zipmap (:nodes test) (repeat 1)))))
 
 (defn test
   [opts]
@@ -324,12 +375,13 @@
                 :db       (db {:versions {:tendermint "0.10.0"
                                           :abci       "0.5.0"
                                           :merkleeyes "0.2.2"}})
-                :client   (client)
+                :client   (cas-register-client)
                 :model    (model/cas-register)
                 :checker  checker})
         nemesis (nemesis test)
         test    (merge test
-                       {:generator (->> (independent/concurrent-generator
+                       {:validator-weights (validator-weights test)
+                        :generator (->> (independent/concurrent-generator
                                           (* 2 n)
                                           (range)
                                           (fn [k]

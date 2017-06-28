@@ -61,7 +61,8 @@
    :conn-timeout    10000
    :accept          :json
    :as              :json
-   :throw-entire-message? true})
+   :throw-entire-message? true
+   :retry-handler   (fn [ex try-count http-context] false)})
 
 (defn broadcast-tx!
   "Broadcast a given transaction to the given node. tx can be a string, in
