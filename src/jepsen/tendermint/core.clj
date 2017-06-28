@@ -231,7 +231,12 @@
              (assoc op :type :fail, :error :not-found))
 
            (catch java.net.ConnectException e
-             (assoc op :type :fail, :error :connection-refused))
+             (condp re-find (.getMessage e)
+               #"Connection refused"
+               (assoc op :type :fail, :error :connection-refused)
+
+               (assoc op :type crash, :error [:connect-exception
+                                              (.getMessage e)])))
 
            (catch java.net.SocketTimeoutException e
              (assoc op :type crash, :error :timeout)))))
@@ -268,7 +273,7 @@
                  {})
          vals)))
 
-(defn dup-validators-grudge
+(defn peekaboo-dup-validators-grudge
   "Takes a test. Returns a function which takes a collection of nodes from that
   test, and constructs a network partition (a grudge) which isolates some dups
   completely, and leaves one connected to the majority component."
@@ -293,9 +298,12 @@
   "The generator and nemesis for each nemesis profile"
   [test]
   (case (:nemesis test)
-    :twofaced-validators {:nemesis (nemesis/partitioner
-                                     (dup-validators-grudge test))
-                          :generator (gen/start-stop 0 5)}
+    :peekaboo-dup-validators {:nemesis (nemesis/partitioner
+                                         (peekaboo-dup-validators-grudge test))
+                              :generator (gen/start-stop 0 5)}
+;    :split-dup-validators {:nemesis (nemesis/partitioner
+;                                      (split-dup-validators-grudge test))
+;                           :generator (gen/once {:type :info, :f :start})}
     :half-partitions {:nemesis   (nemesis/partition-random-halves)
                       :generator (gen/start-stop 5 30)}
     :ring-partitions {:nemesis (nemesis/partition-majorities-ring)
