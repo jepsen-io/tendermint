@@ -418,7 +418,7 @@
                                           (fn [k]
                                             (->> (gen/mix [w cas])
                                                  (gen/reserve n r)
-                                                 (gen/stagger 1/2)
+                                                 (gen/stagger 1)
                                                  (gen/limit 100))))
                                         (gen/nemesis (:generator nemesis))
                                         (gen/time-limit (:time-limit opts)))
