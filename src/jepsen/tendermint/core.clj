@@ -262,25 +262,28 @@
 (defn dup-groups
   "Takes a test with a :dup-validators map of nodes to the nodes they imitate,
   and turns that into a collection of collections of nodes, each of which is
-  several nodes pretending to be the same node."
+  several nodes pretending to be the same node. Returns a map of :groups, which
+  are the aforementioned groups, :singles, those groups with only 1 node, and
+  :dups, with more than one."
   [test]
-  (let [dv (:dup-validators test)]
-    (->> (:nodes test)
-         (reduce (fn [index node]
-                   (let [orig (get dv node node)
-                         coll (get index orig #{})]
-                     (assoc index orig (conj coll node))))
-                 {})
-         vals)))
+  (let [dv (:dup-validators test)
+        groups (->> (:nodes test)
+                    (reduce (fn [index node]
+                              (let [orig (get dv node node)
+                                    coll (get index orig #{})]
+                                (assoc index orig (conj coll node))))
+                            {})
+                    vals)]
+    {:groups  groups
+     :singles (filter #(= 1 (count %)) groups)
+     :dups    (filter #(< 1 (count %)) groups)}))
 
 (defn peekaboo-dup-validators-grudge
   "Takes a test. Returns a function which takes a collection of nodes from that
   test, and constructs a network partition (a grudge) which isolates some dups
   completely, and leaves one connected to the majority component."
   [test]
-  (let [groups  (dup-groups test)
-        singles (filter #(= 1 (count %)) groups)
-        dups    (filter #(< 1 (count %)) groups)]
+  (let [{:keys [groups singles dups]} (dup-groups test)]
     (fn [nodes]
       ; Pick one random node from every group of dups to participate in the
       ; main component, and compute the remaining complement for each dup
@@ -294,6 +297,26 @@
                 ; Exiles
                 exiles))))))
 
+(defn split-dup-validators-grudge
+  "Takes a test. Returns a function which takes a collection of nodes from that
+  test, and constructs a network partition (a grudge) which splits the network
+  into n disjoint components, each having a single duplicate validator and an
+  equal share of the remaining nodes."
+  [test]
+  (let [{:keys [groups singles dups]} (dup-groups test)]
+    (fn [nodes]
+      (let [n (reduce max (map count dups))]
+        (->> groups
+             shuffle
+             (map shuffle)
+             (apply concat)
+             (reduce (fn [[components i] node]
+                       [(update components (mod i n) conj node)
+                        (inc i)])
+                     [[] 0])
+             first
+             nemesis/complete-grudge)))))
+
 (defn nemesis
   "The generator and nemesis for each nemesis profile"
   [test]
@@ -301,9 +324,9 @@
     :peekaboo-dup-validators {:nemesis (nemesis/partitioner
                                          (peekaboo-dup-validators-grudge test))
                               :generator (gen/start-stop 0 5)}
-;    :split-dup-validators {:nemesis (nemesis/partitioner
-;                                      (split-dup-validators-grudge test))
-;                           :generator (gen/once {:type :info, :f :start})}
+    :split-dup-validators {:nemesis (nemesis/partitioner
+                                      (split-dup-validators-grudge test))
+                           :generator (gen/once {:type :info, :f :start})}
     :half-partitions {:nemesis   (nemesis/partition-random-halves)
                       :generator (gen/start-stop 5 30)}
     :ring-partitions {:nemesis (nemesis/partition-majorities-ring)
@@ -335,10 +358,8 @@
   [test]
   (let [dup-vals (:dup-validators test)]
     (if (seq dup-vals)
-      (let [groups  (dup-groups test)
-            singles (filter #(= 1 (count %)) groups)
-            dups    (filter #(< 1 (count %)) groups)
-            n       (count groups)]
+      (let [{:keys [groups singles dups]} (dup-groups test)
+            n                             (count groups)]
         (assert (= 1 (count dups))
                 "Don't know how to handle more than one dup validator key")
         ; The sum of the normal nodes weights should be just over 1/3, so
