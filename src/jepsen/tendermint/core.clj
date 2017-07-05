@@ -15,7 +15,7 @@
              [independent :as independent]
              [nemesis :as nemesis]
              [tests :as tests]
-             [util :as util :refer [timeout map-vals]]]
+             [util :as util :refer [timeout retry map-vals]]]
             [jepsen.checker.timeline :as timeline]
             [jepsen.nemesis.time :as nt]
             [jepsen.control.util :as cu]
@@ -253,11 +253,43 @@
        (set-client node))
 
      (invoke! [_ test op]
-       (let [[k v] (:value op)]
+       (let [[k v] (:value op)
+             crash (if (= (:f op) :read)
+                     :fail
+                     :info)]
          (try+
            (case (:f op)
-             ; WIP
-             )))))))
+             :init (retry 1
+                     (do (tc/write! node k [])
+                       (assoc op :type :ok)))
+             :add (let [s (or (vec (tc/read node k)) [])
+                        s' (conj s v)]
+                    (tc/cas! node k s s')
+                    (assoc op :type :ok))
+             :read (assoc op
+                          :type :ok
+                          :value (independent/tuple
+                                   k
+                                   (into (sorted-set) (tc/read node k)))))
+
+           (catch [:type :unauthorized] e
+             (assoc op :type :fail, :error :precondition-failed))
+
+           (catch [:type :base-unknown-address] e
+             (assoc op :type :fail, :error :not-found))
+
+           (catch java.net.ConnectException e
+             (condp re-find (.getMessage e)
+               #"Connection refused"
+               (assoc op :type :fail, :error :connection-refused)
+
+               (assoc op :type crash, :error [:connect-exception
+                                              (.getMessage e)])))
+
+           (catch java.net.SocketTimeoutException e
+             (assoc op :type crash, :error :timeout)))))
+
+     (teardown! [_ test]))))
 
 (defn dup-groups
   "Takes a test with a :dup-validators map of nodes to the nodes they imitate,
@@ -357,17 +389,21 @@
   duplicated key, assuming there's exactly one dup key."
   [test]
   (let [dup-vals (:dup-validators test)]
-    (if (seq dup-vals)
+    (if-not (seq dup-vals)
+      ; Equal weights
+      (zipmap (:nodes test) (repeat 1))
+
       (let [{:keys [groups singles dups]} (dup-groups test)
             n                             (count groups)]
         (assert (= 1 (count dups))
                 "Don't know how to handle more than one dup validator key")
-        ; The sum of the normal nodes weights should be just over 1/3, so
-        ; that the remaining node can make up just under 2/3rds of the votes
-        ; by itself. Let a normal node's weight be 2. Then 2(n-1) is the
-        ; combined voting power of the normal bloc. We can then choose
-        ; 4(n-1) - 1 as the weight for the dup validator. The total votes
-        ; are
+        ; For super dup validators, we want the dup validator key to have just
+        ; shy of 2/3 voting power. That means the sum of the normal nodes
+        ; weights should be just over 1/3, so that the remaining node can make
+        ; up just under 2/3rds of the votes by itself. Let a normal node's
+        ; weight be 2. Then 2(n-1) is the combined voting power of the normal
+        ; bloc. We can then choose 4(n-1) - 1 as the weight for the dup
+        ; validator. The total votes are
         ;
         ;    2(n-1) + 4(n-1) - 1
         ;  = 6(n-1) - 1
@@ -379,21 +415,111 @@
         ; which approaches 2/3 from 0 for n = 1 -> infinity, and if a single
         ; regular node is added to a duplicate node, a 2/3+ majority is
         ; available for all n >= 1.
+        ;
+        ; For regular dup validators, let an individual node have weight 2. The
+        ; total number of individual votes is 2(n-1), which should be just
+        ; larger than twice the number of dup votes, e.g:
+        ;
+        ;     2(n-1) = 2d + e
+        ;
+        ; where e is some small positive integer, and d is the number of dup
+        ; votes. Solving for d:
+        ;
+        ;     (2(n-1) - e) / 2 = d
+        ;          n - 1 - e/2 = d    ; Choose e = 2
+        ;                n - 2 = d
+        ;
+        ; The total number of votes is therefore:
+        ;
+        ;     2(n-1) + n - 2
+        ;   = 3n - 4
+        ;
+        ; So a dup validator alone has vote fraction:
+        ;
+        ;     (n - 2) / (3n - 4)
+        ;
+        ; which is always under 1/3. And with a single validator, it has vote
+        ; fraction:
+        ;
+        ;     (n - 2) + 2 / (3n - 4)
+        ;   =           n / (3n - 4)
+        ;
+        ; which is always over 1/3.
         (merge (zipmap (apply concat singles) (repeat 2))
-               (zipmap (first dups) (repeat (dec (* 4 (dec n)))))))
-      (zipmap (:nodes test) (repeat 1)))))
+               (zipmap (first dups) (repeat
+                                      (if (:super-dup-validators test)
+                                        (dec (* 4 (dec n)))
+                                        (- n 2)))))))))
+(defn deref-gen
+  "Sometimes you need to build a generator not *now*, but *later*; e.g. because
+  it depends on state that won't be available until the generator is actually
+  invoked. Wrap a derefable returning a generator in this, and it'll be deref'ed
+  only when asked for ops."
+  [dgen]
+  (reify gen/Generator
+    (op [this test process]
+      (gen/op @dgen test process))))
+
+(defn workload
+  "Given a test map, computes
+
+      {:generator a generator of client ops
+       :client    a client to execute those ops
+       :model     a model to validate the history
+       :checker   a map of checker names to checkers to run}."
+  [test]
+  (let [n (count (:nodes test))]
+    (case (:workload test)
+      :cas-register {:client    (cas-register-client)
+                     :model     (model/cas-register)
+                     :generator (independent/concurrent-generator
+                                  (* 2 n)
+                                  (range)
+                                  (fn [k]
+                                    (->> (gen/mix (w cas))
+                                         (gen/reserve n r)
+                                         (gen/stagger 1)
+                                         (gen/limit 120))))
+                     :final-generator nil
+                     :checker {:linear (independent/checker
+                                         (checker/linearizable))}}
+      :set
+      (let [keys (atom [])]
+        {:client (set-client)
+         :model  nil
+         :generator (independent/concurrent-generator
+                      n
+                      (range)
+                      (fn [k]
+                        (swap! keys conj k)
+                        (gen/phases
+                          (gen/once {:type :invoke, :f :init})
+                          (->> (range)
+                               (map (fn [x]
+                                      {:type :invoke
+                                       :f    :add
+                                       :value x}))
+                               gen/seq
+                               (gen/stagger 1/2)))))
+         :final-generator (deref-gen
+                            (delay
+                              (locking keys
+                                (independent/concurrent-generator
+                                  n
+                                  @keys
+                                  (fn [k]
+                                    (gen/each (gen/once {:type :invoke
+                                                         :f :read})))))))
+         :checker {:set (independent/checker (checker/set))}}))))
+
 
 (defn test
   [opts]
-  (let [n       (count (:nodes opts))
-        checker (checker/compose
-                  {:linear   (independent/checker (checker/linearizable))
-                   :timeline (independent/checker (timeline/html))
-                   :perf     (checker/perf)})
-        test (merge
+  (let [test (merge
                tests/noop-test
                opts
-               {:name (str "tendermint " (name (:nemesis opts)))
+               {:name (str "tendermint " (:workload test) " "
+                           (name (:nemesis opts)))
                 :os   debian/os
                 :nonserializable-keys [:validators]
                 ; A map of validator nodes to the nodes whose keys they use
@@ -405,22 +531,26 @@
                                  (into {}))
                 :db       (db {:versions {:tendermint "0.10.0"
                                           :abci       "0.5.0"
-                                          :merkleeyes "0.2.2"}})
-                :client   (cas-register-client)
-                :model    (model/cas-register)
-                :checker  checker})
+                                          :merkleeyes "0.2.2"}})})
         nemesis (nemesis test)
+        workload (workload test)
+        checker (checker/compose
+                  (merge {:timeline (independent/checker (timeline/html))
+                          :perf     (checker/perf)}
+                         (:checker workload)))
         test    (merge test
                        {:validator-weights (validator-weights test)
-                        :generator (->> (independent/concurrent-generator
-                                          (* 2 n)
-                                          (range)
-                                          (fn [k]
-                                            (->> (gen/mix [w cas])
-                                                 (gen/reserve n r)
-                                                 (gen/stagger 1)
-                                                 (gen/limit 100))))
-                                        (gen/nemesis (:generator nemesis))
-                                        (gen/time-limit (:time-limit opts)))
-                        :nemesis (:nemesis nemesis)})]
+                        :client     (:client workload)
+                        :generator  (gen/phases
+                                      (->> (:generator workload)
+                                           (gen/nemesis (:generator nemesis))
+                                           (gen/time-limit (:time-limit opts)))
+                                      (gen/nemesis
+                                        (gen/once {:type :info, :f :stop}))
+                                      (gen/sleep 60)
+                                      (gen/clients
+                                        (:final-generator workload)))
+                        :nemesis    (:nemesis nemesis)
+                        :model      (:model workload)
+                        :checker    checker})]
     test))

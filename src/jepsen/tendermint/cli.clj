@@ -7,10 +7,14 @@
 
 (def opts
   "Extra command line opts."
-  [[nil "--nemesis NEMESIS" "Nemesis to use; e.g. clocks"
+  [[nil "--workload WORKLOAD" "Test workload to run; e.g. cas-register, set"
+    :default :cas-register
+    :parse-fn keyword]
+   [nil "--nemesis NEMESIS" "Nemesis to use; e.g. clocks"
    :default :none
    :parse-fn keyword]
-   [nil "--dup-validators" "Whether to have multiple validators share the same key."]])
+   [nil "--dup-validators" "Whether to have multiple validators share the same key."]
+   [nil "--super-dup-validators" "Should duplicate validators have just shy of 2/3 the voting weight?"]])
 
 (defn -main
   [& args]
