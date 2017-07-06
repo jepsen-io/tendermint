@@ -29,10 +29,8 @@
 (defn install-component!
   "Download and install a tendermint component"
   [app opts]
-  (let [base    "https://s3-us-west-2.amazonaws.com/tendermint/binaries/"
-        ext     "linux_amd64.zip"
-        version (get-in opts [:versions (keyword app)])
-        path    (str base app "/v" version "/" app "_" version "_" ext)]
+  (let [opt-name (keyword (str app "-url"))
+        path (get opts opt-name)]
     (cu/install-archive! path (str base-dir "/" app))))
 
 (defn gen-validator
@@ -162,14 +160,9 @@
   (reify db/DB
     (setup! [_ test node]
       (c/su
-        ; (install-component! "tendermint"  opts)
+        (install-component! "tendermint"  opts)
         (install-component! "abci"        opts)
-        ; (install-component! "merkleeyes"  opts)
-        (c/cd base-dir
-              (c/exec :wget "https://s3-us-west-2.amazonaws.com/tendermint/jepsen/tendermint")
-              (c/exec :chmod "+x" "tendermint")
-              (c/exec :wget "https://s3-us-west-2.amazonaws.com/tendermint/jepsen/merkleeyes")
-              (c/exec :chmod "+x" "merkleeyes"))
+        (install-component! "merkleeyes"  opts)
 
         (gen-validator! test node)
         (gen-genesis!   test)
@@ -529,9 +522,7 @@
                 :validators (->> (:nodes opts)
                                  (map (fn [node] [node (promise)]))
                                  (into {}))
-                :db       (db {:versions {:tendermint "0.10.0"
-                                          :abci       "0.5.0"
-                                          :merkleeyes "0.2.2"}})})
+                :db       (db opts)})
         nemesis (nemesis test)
         workload (workload test)
         checker (checker/compose

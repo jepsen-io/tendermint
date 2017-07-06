@@ -55,6 +55,7 @@
         (throw+ (assoc tx :type :unknown-tx-error))))
 
 (def port "HTTP interface port" 46657)
+
 (def default-http-opts
   "clj-http options"
   {:socket-timeout  10000

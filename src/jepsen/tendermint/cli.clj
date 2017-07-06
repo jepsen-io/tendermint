@@ -14,7 +14,11 @@
    :default :none
    :parse-fn keyword]
    [nil "--dup-validators" "Whether to have multiple validators share the same key."]
-   [nil "--super-dup-validators" "Should duplicate validators have just shy of 2/3 the voting weight?"]])
+   [nil "--super-dup-validators" "Should duplicate validators have just shy of 2/3 the voting weight?"]
+   (jc/package-opt "tendermint-url" "https://aphyr.com/media/tendermint-20160706.tar.bz2")
+   (jc/package-opt "merkleeyes-url" "https://aphyr.com/media/merkleeyes-20160706.tar.bz2")
+   (jc/package-opt "abci-url" "https://s3-us-west-2.amazonaws.com/tendermint/binaries/abci/v0.5.0/abci_0.5.0_linux_amd64.zip")])
+
 
 (defn -main
   [& args]
