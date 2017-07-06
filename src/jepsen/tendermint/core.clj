@@ -15,7 +15,7 @@
              [independent :as independent]
              [nemesis :as nemesis]
              [tests :as tests]
-             [util :as util :refer [timeout retry map-vals]]]
+             [util :as util :refer [timeout with-retry map-vals]]]
             [jepsen.checker.timeline :as timeline]
             [jepsen.nemesis.time :as nt]
             [jepsen.control.util :as cu]
@@ -252,9 +252,15 @@
                      :info)]
          (try+
            (case (:f op)
-             :init (retry 1
-                     (do (tc/write! node k [])
-                       (assoc op :type :ok)))
+             :init (with-retry [tries 0]
+                     (tc/write! node k [])
+                     (assoc op :type :ok)
+                     (catch Exception e
+                       (if (<= 10 tries)
+                         (throw e)
+                         (do (info "Couldn't initialize key" k ":" (.getMessage e) "- retrying")
+                             (Thread/sleep (* 50 (Math/pow 2 tries)))
+                             (retry (inc tries))))))
              :add (let [s (or (vec (tc/read node k)) [])
                         s' (conj s v)]
                     (tc/cas! node k s s')
@@ -538,7 +544,7 @@
                                            (gen/time-limit (:time-limit opts)))
                                       (gen/nemesis
                                         (gen/once {:type :info, :f :stop}))
-                                      (gen/sleep 60)
+                                      (gen/sleep 30)
                                       (gen/clients
                                         (:final-generator workload)))
                         :nemesis    (:nemesis nemesis)
