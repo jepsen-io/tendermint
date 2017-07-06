@@ -475,7 +475,7 @@
                                   (* 2 n)
                                   (range)
                                   (fn [k]
-                                    (->> (gen/mix (w cas))
+                                    (->> (gen/mix [w cas])
                                          (gen/reserve n r)
                                          (gen/stagger 1)
                                          (gen/limit 120))))
