@@ -517,7 +517,7 @@
   (let [test (merge
                tests/noop-test
                opts
-               {:name (str "tendermint " (:workload test) " "
+               {:name (str "tendermint " (name (:workload opts)) " "
                            (name (:nemesis opts)))
                 :os   debian/os
                 :nonserializable-keys [:validators]
