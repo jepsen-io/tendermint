@@ -105,9 +105,10 @@
        (map (fn [node] (str node ":46656")))
        (str/join ",")))
 
+(def socket-file (str base-dir "/merkleeyes.sock"))
 (def socket
-  "The socket we use to communicate with merkleeyes"
-  "unix://merkleeyes.sock")
+  "The socket address we use to communicate with merkleeyes"
+  (str "unix://" socket-file))
 
 (def merkleeyes-logfile (str base-dir "/merkleeyes.log"))
 (def tendermint-logfile (str base-dir "/tendermint.log"))
@@ -127,11 +128,12 @@
             :--home base-dir
             :node
             :--proxy_app socket
-            :--p2p.seeds (seeds test node)))))
+            :--p2p.seeds (seeds test node))))
+  :started)
 
 (defn start-merkleeyes!
   "Starts merkleeyes as a daemon."
-  []
+  [test node]
   (c/su
     (c/cd base-dir
           (cu/start-daemon!
@@ -141,13 +143,27 @@
             "./merkleeyes"
             :start
             :--dbName   "jepsen"
-            :--address  socket))))
+            :--address  socket)))
+  :started)
 
-(defn stop-tendermint! []
-  (c/su (cu/stop-daemon! tendermint-pidfile)))
+(defn stop-tendermint! [test node]
+  (c/su (cu/stop-daemon! tendermint-pidfile))
+  :stopped)
 
-(defn stop-merkleeyes! []
-  (c/su (cu/stop-daemon! merkleeyes-pidfile)))
+(defn stop-merkleeyes! [test node]
+  (c/su (cu/stop-daemon! merkleeyes-pidfile)
+        (c/exec :rm :-rf socket-file))
+  :stopped)
+
+(defn start!
+  [test node]
+  (start-merkleeyes! test node)
+  (start-tendermint! test node))
+
+(defn stop!
+  [test node]
+  (stop-merkleeyes! test node)
+  (stop-tendermint! test node))
 
 (defn db
   "A complete Tendermint system. Options:
@@ -168,7 +184,7 @@
         (gen-genesis!   test)
         (write-config!)
 
-        (start-merkleeyes!)
+        (start-merkleeyes! test node)
         (start-tendermint! test node)
 
         (nt/install!)
@@ -176,8 +192,8 @@
         (Thread/sleep 1000)))
 
     (teardown! [_ test node]
-      (stop-merkleeyes!)
-      (stop-tendermint!)
+      (stop-merkleeyes! test node)
+      (stop-tendermint! test node)
       (c/su
         (c/exec :rm :-rf base-dir)))
 
@@ -222,6 +238,9 @@
 
            (catch [:type :base-unknown-address] e
              (assoc op :type :fail, :error :not-found))
+
+           (catch org.apache.http.NoHttpResponseException e
+             (assoc op :type crash, :error :no-http-response))
 
            (catch java.net.ConnectException e
              (condp re-find (.getMessage e)
@@ -276,6 +295,9 @@
 
            (catch [:type :base-unknown-address] e
              (assoc op :type :fail, :error :not-found))
+
+           (catch org.apache.http.NoHttpResponseException e
+             (assoc op :type crash, :error :no-http-response))
 
            (catch java.net.ConnectException e
              (condp re-find (.getMessage e)
@@ -348,6 +370,39 @@
              first
              nemesis/complete-grudge)))))
 
+(defn crash-truncate-nemesis
+  "A nemesis which kills tendermint, kills merkleeyes, truncates the merkleeyes
+  log, and restarts the process, on up to `fraction` of the test's nodes."
+  [test fraction]
+  (let [faulty-nodes (take (Math/floor (* fraction (count (:nodes test))))
+                           (shuffle (:nodes test)))]
+    (reify client/Client
+      (setup! [this test _] this)
+
+      (invoke! [this test op]
+        (assert (= (:f op) :crash))
+        (c/on-nodes test faulty-nodes
+                    (fn [test node]
+                      (stop-tendermint! test node)
+                      (stop-merkleeyes! test node)
+                      (c/su
+                        (c/exec :truncate :-c :-s
+                                (str "-" (rand-int 1048576))
+                                (str base-dir "/jepsen/jepsen.db/000001.log")))
+                      (start-merkleeyes! test node)
+                      (start-tendermint! test node)))
+        op)
+
+      (teardown! [this test]
+        ; Ensure processes start back up by the end
+        (c/on-nodes test faulty-nodes start-merkleeyes!)
+        (c/on-nodes test faulty-nodes start-tendermint!)))))
+
+(defn crash-nemesis
+  "A nemesis which kills merkleeyes and tendermint on all nodes."
+  []
+  (nemesis/node-start-stopper identity stop! start!))
+
 (defn nemesis
   "The generator and nemesis for each nemesis profile"
   [test]
@@ -355,17 +410,32 @@
     :peekaboo-dup-validators {:nemesis (nemesis/partitioner
                                          (peekaboo-dup-validators-grudge test))
                               :generator (gen/start-stop 0 5)}
+
     :split-dup-validators {:nemesis (nemesis/partitioner
                                       (split-dup-validators-grudge test))
                            :generator (gen/once {:type :info, :f :start})}
+
     :half-partitions {:nemesis   (nemesis/partition-random-halves)
                       :generator (gen/start-stop 5 30)}
+
     :ring-partitions {:nemesis (nemesis/partition-majorities-ring)
                       :generator (gen/start-stop 5 30)}
+
     :single-partitions {:nemesis (nemesis/partition-random-node)
                         :generator (gen/start-stop 5 30)}
+
     :clocks     {:nemesis   (nt/clock-nemesis)
                  :generator (gen/stagger 5 (nt/clock-gen))}
+
+    :crash      {:nemesis (crash-nemesis)
+                 :generator (gen/start-stop 15 0)}
+
+    :crash-truncate {:nemesis (nemesis/compose
+                                {#{:crash} (crash-truncate-nemesis test 1/3)
+                                 #{:stop}  nemesis/noop})
+                     :generator (->> {:type :info, :f :crash}
+                                     (gen/delay 10))}
+
     :none       {:nemesis   client/noop
                  :generator gen/void}))
 
