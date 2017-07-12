@@ -3,50 +3,103 @@
   format: https://github.com/tendermint/go-wire"
   (:import (java.nio ByteBuffer)))
 
-(defn int-size
-  "Number of bytes required to represent a number. We're only doing positive
-  ones for now."
-  [n]
-  (cond (<  n 0x0)        (throw (IllegalArgumentException.
-                                   (str "Number " n " can't be negative")))
-        (<= n 0x0)        0
-        (<= n 0xff)       1
-        (<= n 0xffff)     2
-        (<= n 0xffffff)   3
-        (<= n 0xffffffff) 4
-        true              (throw (IllegalArgumentException.
-                                   (str "Number " n " is too large")))))
+(defprotocol Writable
+  (byte-size [w])
+  (write! [w ^ByteBuffer b]))
+
+; Fixed size ints
+(defrecord UInt8  [^byte x]
+  Writable
+  (byte-size [_] 1)
+  (write! [_ b] (.put b x) b))
+
+(defn uint8
+  [b]
+  (UInt8. (unchecked-byte b)))
+
+(defrecord UInt64 [^long x]
+  Writable
+  (byte-size [_] 8)
+  (write! [_ b] (.putLong b x) b))
+
+(defn uint64 [^long l]
+  (UInt64. l))
+
+; Fixed-size byte buffers, which don't have a length header
+(defrecord FixedBytes [^ByteBuffer x]
+  Writable
+  (byte-size [_] (.remaining x))
+  (write! [_ buf]
+          (.put buf x)
+          buf))
+
+(defn fixed-bytes
+  [x]
+  (if (instance? ByteBuffer x)
+    (FixedBytes. x)
+    (FixedBytes. (ByteBuffer/wrap x))))
+
+; Generic types
+(extend-protocol Writable
+  ; Integers work like Longs
+  Integer
+  (byte-size [n]  (byte-size (long n)))
+  (write! [n buf] (write! (long n) buf))
+
+  ; Longs are varints
+  Long
+  (byte-size [n]
+    (cond (<  n 0x0)        (throw (IllegalArgumentException.
+                                     (str "Number " n " can't be negative")))
+          (<= n 0x0)        1
+          (<= n 0xff)       2
+          (<= n 0xffff)     3
+          (<= n 0xffffff)   4
+          (<= n 0xffffffff) 5
+          true              (throw (IllegalArgumentException.
+                                     (str "Number " n " is too large")))))
+
+  (write! [n buf]
+    (let [int-size (dec (byte-size n))]
+      (.put buf (unchecked-byte int-size)) ; Write size byte
+      (condp = int-size
+        0  nil
+        1 (.put       buf (unchecked-byte n))
+        2 (.putShort  buf (unchecked-short n))
+        3 (throw (IllegalArgumentException. "Todo: bit munging"))
+        4 (.putInt    buf (unchecked-int n))))
+    buf)
+
+  ByteBuffer
+  (byte-size [b]
+    (let [r (.remaining b)]
+      (+ (byte-size r) r)))
+
+  (write! [inbuf outbuf]
+    (write! (.remaining inbuf) outbuf)
+    (.put outbuf inbuf)
+    outbuf)
+
+  ; To write sequential collections, just write each thing recursively
+  clojure.lang.Sequential
+  (byte-size [coll]
+    (reduce + 0 (map byte-size coll)))
+
+  (write! [coll buf]
+    (doseq [x coll]
+      (write! x buf))
+    buf))
 
 (defn buffer-for
   "Constructs a ByteBuffer big enough to write the given collection of objects
   to. Extra is an integer number of extra bytes to allocate."
-  ([xs]
-   (buffer-for xs 0))
-  ([xs extra]
-   (ByteBuffer/allocate
-     (->> xs
-          (map (fn [x]
-                 (condp instance? x
+  [x]
+  (ByteBuffer/allocate (byte-size x)))
 
-                   ByteBuffer (+ 5 (.remaining x)))))
-          (reduce + extra)))))
-
-(defn write-varint!
-  "Writes a varint to a ByteBuffer, and returns the buffer."
-  [^ByteBuffer buf n]
-  (let [int-size (int-size n)]
-    (.put buf (unchecked-byte int-size)) ; Write size byte
-    (condp = int-size
-      0 nil
-      1 (.put       buf (unchecked-byte n))
-      2 (.putShort  buf (unchecked-short n))
-      3 (throw (IllegalArgumentException. "Todo: bit munging"))
-      4 (.putInt    buf (unchecked-int n))))
-  buf)
-
-(defn write-byte-buffer!
-  "Writes a buffer x to a wire buffer buf. Returns buf."
-  [^ByteBuffer buf ^ByteBuffer x]
-  (write-varint! buf (.remaining x))
-  (.put buf x)
-  buf)
+(defn write
+  "Creates a new buffer, writes the given data structure to it, and returns
+  that ByteBuffer, flipped."
+  [x]
+  (->> (buffer-for x)
+       (write! x)
+       .flip))

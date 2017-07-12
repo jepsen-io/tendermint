@@ -98,15 +98,16 @@
   []
   (let [buf (byte-array 12)]
     (.nextBytes (Random.) buf)
-    (ByteBuffer/wrap buf)))
+    (w/fixed-bytes buf)))
 
 (def tx-types
   "A map of transaction type keywords to their magic bytes."
-  (map-vals unchecked-byte
-            {:set    0x01
-             :remove 0x02
-             :get    0x03
-             :cas    0x04}))
+  (map-vals w/uint8
+            {:set             0x01
+             :remove          0x02
+             :get             0x03
+             :cas             0x04
+             :alter-validator 0x05}))
 
 (defn tx-type
   "Returns the byte for a transaction type keyword"
@@ -117,12 +118,7 @@
 (defn tx
   "Construct a merkleeyes transaction byte buffer"
   [type & args]
-  (let [nonce (nonce)
-        b (w/buffer-for (cons nonce args) 1)]
-    (.put b nonce)
-    (.put b (tx-type type))
-    (reduce w/write-byte-buffer! b args)
-    (.flip b)))
+  (w/write [(nonce) (tx-type type) args]))
 
 (defn write!
   "Ask node to set k to v"
@@ -142,6 +138,14 @@
   "Perform a compare-and-set from v to v' of k"
   [node k v v']
   (broadcast-tx! node (tx :cas (f/write k) (f/write v) (f/write v'))))
+
+(defn alter-validator!
+  "Change the weight of a validator, given by private key (a hex string), and a
+  voting power, an integer."
+  [node validator-key weight]
+  (-> (broadcast-tx! node (tx :alter-validator
+                              (hex->byte-buf validator-key)
+                              (w/uint64 weight)))))
 
 (defn local-read
   "Read by querying a particular node"
