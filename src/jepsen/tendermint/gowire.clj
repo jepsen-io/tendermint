@@ -41,10 +41,15 @@
 
 ; Generic types
 (extend-protocol Writable
+  ; Nil is nothing
+  nil
+  (byte-size  [n] 0)
+  (write!     [n buf] buf)
+
   ; Integers work like Longs
   Integer
-  (byte-size [n]  (byte-size (long n)))
-  (write! [n buf] (write! (long n) buf))
+  (byte-size  [n]  (byte-size (long n)))
+  (write!     [n buf] (write! (long n) buf))
 
   ; Longs are varints
   Long

@@ -21,189 +21,11 @@
             [jepsen.control.util :as cu]
             [jepsen.os.debian :as debian]
             [cheshire.core :as json]
-            [jepsen.tendermint.client :as tc]
+            [jepsen.tendermint [client :as tc]
+                               [db :as td]
+                               [util :refer [base-dir]]
+                               [validator :as tv]]
             ))
-
-(def base-dir "/opt/tendermint")
-
-(defn install-component!
-  "Download and install a tendermint component"
-  [app opts]
-  (let [opt-name (keyword (str app "-url"))
-        path (get opts opt-name)]
-    (cu/install-archive! path (str base-dir "/" app))))
-
-(defn gen-validator
-  "Generate a new validator structure, and return the validator's data as a
-  map."
-  []
-  (c/cd base-dir
-        (-> (c/exec "./tendermint" :--home base-dir :gen_validator)
-            (json/parse-string true))))
-
-(defn gen-validator!
-  "Generates a validator for the current node (or, if this validator is a dup,
-  waits for the appropriate validator to be ready and clones its keys), then
-  writes out a validator.json, and registers the keys in the test map."
-  [test node]
-  (let [validator (if-let [orig (get (:dup-validators test) node)]
-                    ; Copy from orig's keys
-                    (do (info node "copying" orig "validator key")
-                        @(get-in test [:validators orig]))
-                    ; Generate a fresh one
-                    (gen-validator))]
-    (deliver (get-in test [:validators node]) validator)
-    (c/su
-      (c/cd base-dir
-            (c/exec :echo (json/generate-string validator)
-                    :> "priv_validator.json")
-            (info "Wrote priv_validator.json")))))
-
-(defn gen-genesis
-  "Generate a new genesis structure for a test. Blocks until all pubkeys are
-  available."
-  [test]
-  (let [weights (:validator-weights test)]
-    {:app_hash      ""
-     :chain_id      "jepsen"
-     :genesis_time  "0001-01-01T00:00:00.000Z"
-     :validators    (->> (:validators test)
-                         (reduce (fn [validators [node validator]]
-                                   (let [pub-key (:pub_key @validator)]
-                                     (if (some #(= pub-key (:pub_key %))
-                                               validators)
-                                       validators
-                                       (conj validators
-                                             {:amount  (get weights node)
-                                              :name    node
-                                              :pub_key pub-key}))))
-                                 []))}))
-
-(defn gen-genesis!
-  "Generates a new genesis file and writes it to disk."
-  [test]
-  (c/su
-    (c/cd base-dir
-          (c/exec :echo (json/generate-string (gen-genesis test))
-                  :> "genesis.json")
-          (info "Wrote genesis.json"))))
-
-(defn write-config!
-  "Writes out a config.toml file to the current node."
-  []
-  (c/su
-    (c/cd base-dir
-          (c/exec :echo (slurp (io/resource "config.toml"))
-                  :> "config.toml"))))
-
-(defn seeds
-  "Constructs a --seeds command line for a test, so a tendermint node knows
-  what other nodes to talk to."
-  [test node]
-  (->> (:nodes test)
-       (remove #{node})
-       (map (fn [node] (str node ":46656")))
-       (str/join ",")))
-
-(def socket-file (str base-dir "/merkleeyes.sock"))
-(def socket
-  "The socket address we use to communicate with merkleeyes"
-  (str "unix://" socket-file))
-
-(def merkleeyes-logfile (str base-dir "/merkleeyes.log"))
-(def tendermint-logfile (str base-dir "/tendermint.log"))
-(def merkleeyes-pidfile (str base-dir "/merkleeyes.pid"))
-(def tendermint-pidfile (str base-dir "/tendermint.pid"))
-
-(defn start-tendermint!
-  "Starts tendermint as a daemon."
-  [test node]
-  (c/su
-    (c/cd base-dir
-          (cu/start-daemon!
-            {:logfile tendermint-logfile
-             :pidfile tendermint-pidfile
-             :chdir   base-dir}
-            "./tendermint"
-            :--home base-dir
-            :node
-            :--proxy_app socket
-            :--p2p.seeds (seeds test node))))
-  :started)
-
-(defn start-merkleeyes!
-  "Starts merkleeyes as a daemon."
-  [test node]
-  (c/su
-    (c/cd base-dir
-          (cu/start-daemon!
-            {:logfile merkleeyes-logfile
-             :pidfile merkleeyes-pidfile
-             :chdir   base-dir}
-            "./merkleeyes"
-            :start
-            :--dbName   "jepsen"
-            :--address  socket)))
-  :started)
-
-(defn stop-tendermint! [test node]
-  (c/su (cu/stop-daemon! tendermint-pidfile))
-  :stopped)
-
-(defn stop-merkleeyes! [test node]
-  (c/su (cu/stop-daemon! merkleeyes-pidfile)
-        (c/exec :rm :-rf socket-file))
-  :stopped)
-
-(defn start!
-  [test node]
-  (start-merkleeyes! test node)
-  (start-tendermint! test node))
-
-(defn stop!
-  [test node]
-  (stop-merkleeyes! test node)
-  (stop-tendermint! test node))
-
-(defn db
-  "A complete Tendermint system. Options:
-
-  :versions         A version map, with keys...
-    :tendermint     The version of tendermint to install (e.g. \"0.10.0\")
-    :abci           The version ot ABCI
-    :merkleeyes     The version of Merkle Eyes"
-  [opts]
-  (reify db/DB
-    (setup! [_ test node]
-      (c/su
-        (install-component! "tendermint"  opts)
-        (install-component! "abci"        opts)
-        (install-component! "merkleeyes"  opts)
-
-        (gen-validator! test node)
-        (gen-genesis!   test)
-        (write-config!)
-
-        (start-merkleeyes! test node)
-        (start-tendermint! test node)
-
-        (nt/install!)
-
-        (Thread/sleep 1000)))
-
-    (teardown! [_ test node]
-      (stop-merkleeyes! test node)
-      (stop-tendermint! test node)
-      (c/su
-        (c/exec :rm :-rf base-dir)))
-
-    db/LogFiles
-    (log-files [_ test node]
-      [tendermint-logfile
-       merkleeyes-logfile
-       (str base-dir "/priv_validator.json")
-       (str base-dir "/genesis.json")
-       ])))
 
 (defn r   [_ _] {:type :invoke, :f :read,  :value nil})
 (defn w   [_ _] {:type :invoke, :f :write, :value (rand-int 10)})
@@ -383,30 +205,33 @@
         (assert (= (:f op) :crash))
         (c/on-nodes test faulty-nodes
                     (fn [test node]
-                      (stop-tendermint! test node)
-                      (stop-merkleeyes! test node)
+                      (td/stop-tendermint! test node)
+                      (td/stop-merkleeyes! test node)
                       (c/su
                         (c/exec :truncate :-c :-s
                                 (str "-" (rand-int 1048576))
                                 (str base-dir "/jepsen/jepsen.db/000001.log")))
-                      (start-merkleeyes! test node)
-                      (start-tendermint! test node)))
+                      (td/start-merkleeyes! test node)
+                      (td/start-tendermint! test node)))
         op)
 
       (teardown! [this test]
         ; Ensure processes start back up by the end
-        (c/on-nodes test faulty-nodes start-merkleeyes!)
-        (c/on-nodes test faulty-nodes start-tendermint!)))))
+        (c/on-nodes test faulty-nodes td/start-merkleeyes!)
+        (c/on-nodes test faulty-nodes td/start-tendermint!)))))
 
 (defn crash-nemesis
   "A nemesis which kills merkleeyes and tendermint on all nodes."
   []
-  (nemesis/node-start-stopper identity stop! start!))
+  (nemesis/node-start-stopper identity td/stop! td/start!))
 
 (defn nemesis
   "The generator and nemesis for each nemesis profile"
   [test]
   (case (:nemesis test)
+    :changing-validators {:nemesis   (tv/nemesis)
+                          :generator (gen/stagger 10 (tv/generator))}
+
     :peekaboo-dup-validators {:nemesis (nemesis/partitioner
                                          (peekaboo-dup-validators-grudge test))
                               :generator (gen/start-stop 0 5)}
@@ -584,29 +409,24 @@
 
 (defn test
   [opts]
-  (let [test (merge
+  (let [validator-config (atom nil)
+        test (merge
                tests/noop-test
                opts
                {:name (str "tendermint " (name (:workload opts)) " "
                            (name (:nemesis opts)))
                 :os   debian/os
-                :nonserializable-keys [:validators]
-                ; A map of validator nodes to the nodes whose keys they use
-                ; instead of their own.
-                :dup-validators (dup-validators opts)
-                ; Map of node names to validator data structures, including keys
-                :validators (->> (:nodes opts)
-                                 (map (fn [node] [node (promise)]))
-                                 (into {}))
-                :db       (db opts)})
-        nemesis (nemesis test)
-        workload (workload test)
-        checker (checker/compose
-                  (merge {:timeline (independent/checker (timeline/html))
-                          :perf     (checker/perf)}
-                         (:checker workload)))
+                :nonserializable-keys [:validator-config]
+                :validator-config validator-config})
+        db        (td/db test)
+        nemesis   (nemesis test)
+        workload  (workload test)
+        checker   (checker/compose
+                    (merge {:timeline (independent/checker (timeline/html))
+                            :perf     (checker/perf)}
+                           (:checker workload)))
         test    (merge test
-                       {:validator-weights (validator-weights test)
+                       {:db         db
                         :client     (:client workload)
                         :generator  (gen/phases
                                       (->> (:generator workload)

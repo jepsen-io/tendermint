@@ -4,9 +4,11 @@
   (:require [jepsen.tendermint.gowire :as w]
             [clojure.data.fressian :as f]
             [clj-http.client :as http]
+            [cheshire.core :as json]
             [clojure.tools.logging :refer [info warn]]
             [jepsen.util :refer [map-vals]]
-            [slingshot.slingshot :refer [throw+]])
+            [slingshot.slingshot :refer [throw+]]
+            [byte-streams :as bs])
   (:import (java.nio ByteBuffer)
            (java.util Random)
            (java.lang StringBuilder)))
@@ -103,11 +105,13 @@
 (def tx-types
   "A map of transaction type keywords to their magic bytes."
   (map-vals w/uint8
-            {:set             0x01
-             :remove          0x02
-             :get             0x03
-             :cas             0x04
-             :alter-validator 0x05}))
+            {:set                   0x01
+             :remove                0x02
+             :get                   0x03
+             :cas                   0x04
+             :validator-set-change  0x05
+             :validator-set-read    0x06
+             :validator-set-cas     0x07}))
 
 (defn tx-type
   "Returns the byte for a transaction type keyword"
@@ -139,13 +143,31 @@
   [node k v v']
   (broadcast-tx! node (tx :cas (f/write k) (f/write v) (f/write v'))))
 
-(defn alter-validator!
+(defn validator-set
+  "Reads the current validator set, transactionally."
+  [node]
+  (-> (broadcast-tx! node (tx :validator-set-read))
+              :deliver_tx
+              :data
+              hex->byte-buf
+              (bs/convert java.io.Reader)
+              (json/parse-stream true)))
+
+(defn validator-set-change!
   "Change the weight of a validator, given by private key (a hex string), and a
   voting power, an integer."
   [node validator-key weight]
-  (-> (broadcast-tx! node (tx :alter-validator
+  (-> (broadcast-tx! node (tx :validator-set-change
                               (hex->byte-buf validator-key)
                               (w/uint64 weight)))))
+
+(defn validator-set-cas!
+  "Change the weight of a validator, iff the current version is as given."
+  [node version validator-key power]
+  (-> (broadcast-tx! node (tx :validator-set-cas
+                              (w/uint64 version)
+                              (hex->byte-buf validator-key)
+                              (w/uint64 power)))))
 
 (defn local-read
   "Read by querying a particular node"
