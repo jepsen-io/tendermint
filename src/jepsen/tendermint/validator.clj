@@ -72,12 +72,6 @@
    :validators    (->> (:validators config)
                        vals
                        (map (fn [validator]
-                              (info :validator validator)
-                              (info :pub-key (:pub_key validator))
-                              (info :name    (->> (:nodes config)
-                                                  (filter #(= (val %) (:pub_key validator)))
-                                                  first
-                                                  key))
                               (let [pub-key (:pub_key validator)
                                     name (->> (:nodes config)
                                               (filter #(= (val %) pub-key))
@@ -90,12 +84,13 @@
 (defn pub-key-on-node
   "What pubkey is running on a given node?"
   [config node]
-  (get-in config [:nodes node :pub_key]))
+  (get-in config [:nodes node]))
 
 (defn total-votes
   "How many votes are in the validator set total?"
   [config]
   (->> (:validators config)
+       vals
        (map :votes)
        (reduce + 0)))
 
@@ -112,8 +107,8 @@
   that validator."
   [config]
   (->> (:nodes config)
-       (reduce (fn [m [node validator]]
-                 (update m (:pub_key validator) conj node))
+       (reduce (fn [m [node pub-key]]
+                 (update m pub-key conj node))
                {})))
 
 (defn byzantine-validator-keys
@@ -143,7 +138,7 @@
   node?"
   [config]
   (seq (set/intersection (set (keys (:validators config)))
-                         (set (map :pub_key (vals (:nodes config)))))))
+                         (set (vals (:nodes config))))))
 
 
 (defn omnipotent-byzantines?
@@ -155,28 +150,19 @@
     (some (fn [k] (<= threshold (get vfs k)))
           (byzantine-validator-keys config))))
 
-(defn valid?
-  "Is the given validator set a valid configuration? We must have:
+(defn assert-valid
+  "Ensures that the given config is valid, and returns it. Throws
+  AssertError if not.
 
   - At least one validator which is running on a node
   - No byzantine aggregator controls too much of the vote
   - Validators run on real nodes
   - Validators have nonzero votes"
   [config]
-  (info :config (with-out-str (pprint config)))
-  (and (at-least-one-running-validator? config)
-       (not (omnipotent-byzantines? config))
-       (every? (:node-set config) (keys (:nodes config)))
-       (not-any? zero? (map :votes (vals (:validators config))))))
-
-(defn assert-valid
-  "Ensures that the given config is valid, and returns it. Throws
-  AssertError if not."
-  [config]
   (assert (at-least-one-running-validator? config))
   (assert (not (omnipotent-byzantines? config)))
-  (assert (every? (:node-set config) (keys (nodes config))))
-  (assert (not-any? (zero? (map :votes (vals (:validators config))))))
+  (assert (every? (:node-set config) (keys (:nodes config))))
+  (assert (not-any? zero? (map :votes (vals (:validators config)))))
   config)
 
 ; Possible state transitions:
@@ -241,6 +227,7 @@
     ; Adjust a node's weight
     0 (let [v (rand-validator config)]
         {:type    :alter-votes
+         :version (:version config)
          :pub_key (:pub_key v)
          :votes   (+ (:votes v) (- (rand-int 11) 5))})
     0 nil))
@@ -255,7 +242,6 @@
                                      (pr-str config)
                                      " in less than 100 tries; aborting.")))
       (let [t (rand-transition config)]
-        (info :transition t)
         (step config t)
         t))
     (catch AssertionError e
@@ -354,7 +340,7 @@
             node (:node (:value op))]
         (case (:type t)
           :alter-votes (tc/validator-set-cas!
-                         node (:version t) (:pub_key t) (:votes t)))
+                         node (:version t) (:data (:pub_key t)) (:votes t)))
         op))
 
     (teardown! [this test])))
