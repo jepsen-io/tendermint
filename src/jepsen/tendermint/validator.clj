@@ -225,12 +225,14 @@
   [config]
   (condp <= (rand)
     ; Adjust a node's weight
-    0 (let [v (rand-validator config)]
+    1/2 (let [v (rand-validator config)]
         {:type    :alter-votes
          :version (:version config)
          :pub_key (:pub_key v)
          :votes   (+ (:votes v) (- (rand-int 11) 5))})
-    0 nil))
+    ; Nuke a node
+    0 {:type :destroy
+       :node (rand-taken-node config)}))
 
 (defn rand-legal-transition
   "Generates a random transition on the given config which results in a legal
@@ -303,44 +305,33 @@
            :version version
            :validators validators')))
 
+(defn refresh-config!
+  "Attempts to update the test's config with new information from the cluster.
+  Returns our estimate of the current config. Not threadsafe."
+  [test]
+  ; TODO: make this threadsafe
+  (or (reduce (fn [_ node]
+                (try
+                  (when-let [c (current-config test node)]
+                    (reset! (:validator-config test) c)
+                    (reduced c))
+                  (catch java.io.IOException e
+                    nil)))
+              nil
+              (shuffle (:nodes test)))
+      @(:validator-config test)))
+
 (defn generator
   "A generator of legal state transitions on the current validator state."
   []
   (reify gen/Generator
     (op [this test process]
-      (dt/with-retry [tries 0]
-        ; TODO: improve node selection
-        (let [node   (rand-nth (:nodes test))
-              config (current-config test node)]
+      (try
+        (let [config (refresh-config! test)]
           (info (with-out-str (pprint config)))
           {:type  :info
            :f     :transition
-           :value {:node       node
-                   :transition (rand-legal-transition config)}})
-        (catch java.io.IOException e
-          (warn "IO Exception fetching current validator state; retrying")
-          (Thread/sleep 1000)
-          (if (< tries 100)
-            (retry (inc tries))
-            (throw e)))
+           :value (rand-legal-transition config)})
         (catch Exception e
           (warn e "error generating transition")
           (throw e))))))
-
-(defn nemesis
-  "A nemesis which takes {:nodes [active-node-set], :transition {...}} values
-  and applies those transitions to the cluster."
-  []
-  (reify client/Client
-    (setup! [this test _] this)
-
-    (invoke! [this test op]
-      (assert (= :transition (:f op)))
-      (let [t (:transition (:value op))
-            node (:node (:value op))]
-        (case (:type t)
-          :alter-votes (tc/validator-set-cas!
-                         node (:version t) (:data (:pub_key t)) (:votes t)))
-        op))
-
-    (teardown! [this test])))

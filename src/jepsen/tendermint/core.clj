@@ -225,11 +225,43 @@
   []
   (nemesis/node-start-stopper identity td/stop! td/start!))
 
+(defn changing-validators-nemesis
+  "A nemesis which takes {:nodes [active-node-set], :transition {...}} values
+  and applies those transitions to the cluster."
+  []
+  (reify client/Client
+    (setup! [this test _] this)
+
+    (invoke! [this test op]
+      (assert (= :transition (:f op)))
+      (let [t (:value op)]
+        (case (:type t)
+          :alter-votes
+          (tc/validator-set-cas!
+            (rand-nth (:nodes test))
+            (:version t)
+            (:data (:pub_key t))
+            (:votes t))
+
+          :destroy
+          (c/on-nodes test (list (:node t))
+                      (fn destroy [test node]
+                        (td/stop! test node)
+                        (td/reset-node! test node))))
+
+        ; After we've executed an operation, we need to update our test state to
+        ; reflect the new state of things.
+        (swap! (:validator-config test) #(tv/step % t)))
+
+      op)
+
+    (teardown! [this test])))
+
 (defn nemesis
   "The generator and nemesis for each nemesis profile"
   [test]
   (case (:nemesis test)
-    :changing-validators {:nemesis   (tv/nemesis)
+    :changing-validators {:nemesis   (changing-validators-nemesis)
                           :generator (gen/stagger 10 (tv/generator))}
 
     :peekaboo-dup-validators {:nemesis (nemesis/partitioner

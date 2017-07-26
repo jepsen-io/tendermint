@@ -120,6 +120,20 @@
   (stop-merkleeyes! test node)
   (stop-tendermint! test node))
 
+(def node-files
+  "Files required for a validator's state."
+  (map (partial str base-dir "/")
+       ["data"
+        "genesis.json"
+        "jepsen"
+        "priv_validator.json"
+        "priv_validator.json.bak"]))
+
+(defn reset-node!
+  "Wipe data files and identity but preserve binaries."
+  [test node]
+  (c/su (c/exec :rm :-rf node-files)))
+
 (defn db
   "A complete Tendermint system. Options:
 
