@@ -222,14 +222,32 @@
 
 (defn rand-transition
   "Generates a random transition on the given config."
-  [config]
+  [test config]
   (condp <= (rand)
+    ; Create a new validator
+    2/3 (let [v (-> (c/on-nodes test (list (rand-nth (:nodes test)))
+                                (fn [test node]
+                                  (gen-validator)))
+                    first
+                    val
+                    (assoc :votes 2))]
+          {:type      :add
+           :version   (:version config)
+           :validator v})
+
+    ; Remove a validator
+    1/3 (let [v (rand-validator config)]
+          {:type :remove
+           :version (:version config)
+           :pub_key (:pub_key v)})
+
     ; Adjust a node's weight
-    1/2 (let [v (rand-validator config)]
-        {:type    :alter-votes
-         :version (:version config)
-         :pub_key (:pub_key v)
-         :votes   (+ (:votes v) (- (rand-int 11) 5))})
+    1/4 (let [v (rand-validator config)]
+          {:type    :alter-votes
+           :version (:version config)
+           :pub_key (:pub_key v)
+           :votes   (max 1 (+ (:votes v) (- (rand-int 11) 5)))})
+
     ; Nuke a node
     0 {:type :destroy
        :node (rand-taken-node config)}))
@@ -237,13 +255,13 @@
 (defn rand-legal-transition
   "Generates a random transition on the given config which results in a legal
   state."
-  [config]
+  [test config]
   (dt/with-retry [i 0]
     (if (<= 100 i)
       (throw (RuntimeException. (str "Unable to generate state transition from "
                                      (pr-str config)
                                      " in less than 100 tries; aborting.")))
-      (let [t (rand-transition config)]
+      (let [t (rand-transition test config)]
         (step config t)
         t))
     (catch AssertionError e
@@ -331,7 +349,7 @@
           (info (with-out-str (pprint config)))
           {:type  :info
            :f     :transition
-           :value (rand-legal-transition config)})
+           :value (rand-legal-transition test config)})
         (catch Exception e
           (warn e "error generating transition")
           (throw e))))))

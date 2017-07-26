@@ -15,6 +15,7 @@
 
 (defn uint8
   [b]
+  (assert (not (neg? b)))
   (UInt8. (unchecked-byte b)))
 
 (defrecord UInt64 [^long x]
@@ -23,6 +24,7 @@
   (write! [_ b] (.putLong b x) b))
 
 (defn uint64 [^long l]
+  (assert (not (neg? l)))
   (UInt64. l))
 
 ; Fixed-size byte buffers, which don't have a length header

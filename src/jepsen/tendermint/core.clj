@@ -243,6 +243,20 @@
             (:data (:pub_key t))
             (:votes t))
 
+          :add
+          (tc/validator-set-cas!
+            (rand-nth (:nodes test))
+            (:version t)
+            (:data (:pub_key (:validator t)))
+            (:votes (:validator t)))
+
+          :remove
+          (tc/validator-set-cas!
+            (rand-nth (:nodes test))
+            (:version t)
+            (:data (:pub_key t))
+            0)
+
           :destroy
           (c/on-nodes test (list (:node t))
                       (fn destroy [test node]
