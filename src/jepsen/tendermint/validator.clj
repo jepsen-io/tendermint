@@ -102,6 +102,12 @@
          (map-vals (fn [v]
                      (/ (:votes v) total))))))
 
+(defn running-validators
+  "A collection of validators running on at least one node."
+  [config]
+  (->> (set (vals (:nodes config)))
+       (keep (:validators config))))
+
 (defn nodes-running-validators
   "Takes a config, yielding a map of validator keys to groups of nodes that run
   that validator."
@@ -178,19 +184,27 @@
        (remove (set (keys (:validators config)))
                (vals (:nodes config))))))
 
+(def quorum
+  "What fraction of the configuration's voting power should be online in order
+  to perform operations?"
+  2/3)
+
+(defn quorum?
+  "Does the given configuration provide a quorum of running votes?"
+  [config]
+  (info :running-validators (running-validators config))
+  (<= quorum (/ (reduce + 0 (map :votes (running-validators config)))
+                (total-votes config))))
+
 (defn assert-valid
   "Ensures that the given config is valid, and returns it. Throws
-  AssertError if not.
-
-  - At least one validator which is running on a node
-  - No byzantine aggregator controls too much of the vote
-  - Validators run on real nodes
-  - Validators have nonzero votes"
+  AssertError if not."
   [config]
   (assert (at-least-one-running-validator? config))
   (assert (not (omnipotent-byzantines? config)))
   (assert (not (too-many-ghosts? config)))
   (assert (not (too-many-zombies? config)))
+  (assert (quorum? config))
   (assert (every? (:node-set config) (keys (:nodes config))))
   (assert (not-any? zero? (map :votes (vals (:validators config)))))
   config)
