@@ -150,6 +150,34 @@
     (some (fn [k] (<= threshold (get vfs k)))
           (byzantine-validator-keys config))))
 
+(def ghost-limit
+  "Ghosts are souls without bodies. How many validators can exist without
+  actually running on any node?"
+  2)
+
+(defn too-many-ghosts?
+  "Does this config have too many validators which aren't running on any
+  nodes?"
+  [config]
+  (< ghost-limit
+     (count
+       (set/difference (set (keys (:validators config)))
+                       (set (vals (:nodes config)))))))
+
+(def zombie-limit
+  "Zombies are bodies without souls. How many nodes can run a validator that's
+  not actually a part of the cluster?"
+  2)
+
+(defn too-many-zombies?
+  "Does this config have too many nodes which are running validators that
+  aren't a part of the cluster?"
+  [config]
+  (< zombie-limit
+     (count
+       (remove (set (keys (:validators config)))
+               (vals (:nodes config))))))
+
 (defn assert-valid
   "Ensures that the given config is valid, and returns it. Throws
   AssertError if not.
@@ -161,6 +189,8 @@
   [config]
   (assert (at-least-one-running-validator? config))
   (assert (not (omnipotent-byzantines? config)))
+  (assert (not (too-many-ghosts? config)))
+  (assert (not (too-many-zombies? config)))
   (assert (every? (:node-set config) (keys (:nodes config))))
   (assert (not-any? zero? (map :votes (vals (:validators config)))))
   config)
@@ -184,7 +214,7 @@
       :create (let [n (:node transition)
                     v (:validator transition)]
                 (assert (not (get-in config [:nodes n])))
-                (assoc-in config [:nodes n] v))
+                (assoc-in config [:nodes n] (:pub_key v)))
 
       ; Destroy a validator on a node
       :destroy (update config :nodes dissoc (:node transition))
@@ -212,8 +242,8 @@
 (defn rand-free-node
   "Selects a random node which isn't running anything."
   [config]
-  (rand-nth (set/difference (:node-set config)
-                            (set (keys (:nodes config))))))
+  (rand-nth (seq (set/difference (:node-set config)
+                                 (set (keys (:nodes config)))))))
 
 (defn rand-taken-node
   "Selects a random node that's running a validator."
@@ -223,34 +253,45 @@
 (defn rand-transition
   "Generates a random transition on the given config."
   [test config]
-  (condp <= (rand)
-    ; Create a new validator
-    2/3 (let [v (-> (c/on-nodes test (list (rand-nth (:nodes test)))
-                                (fn [test node]
-                                  (gen-validator)))
-                    first
-                    val
-                    (assoc :votes 2))]
-          {:type      :add
-           :version   (:version config)
-           :validator v})
+  (or (condp <= (rand)
+        ; Create a new instance of a validator on a node.
+        4/5 (let [v (rand-validator config)
+                  n (rand-free-node config)]
+              (when (and v n)
+                {:type      :create
+                 :node      n
+                 :validator v}))
 
-    ; Remove a validator
-    1/3 (let [v (rand-validator config)]
-          {:type :remove
-           :version (:version config)
-           :pub_key (:pub_key v)})
+        ; Nuke a node
+        3/5 {:type :destroy
+             :node (rand-taken-node config)}
 
-    ; Adjust a node's weight
-    1/4 (let [v (rand-validator config)]
-          {:type    :alter-votes
-           :version (:version config)
-           :pub_key (:pub_key v)
-           :votes   (max 1 (+ (:votes v) (- (rand-int 11) 5)))})
+        ; Create a new validator
+        2/5 (let [v (-> (c/on-nodes test (list (rand-nth (:nodes test)))
+                                    (fn [test node]
+                                      (gen-validator)))
+                        first
+                        val
+                        (assoc :votes 2))]
+              {:type      :add
+               :version   (:version config)
+               :validator v})
 
-    ; Nuke a node
-    0 {:type :destroy
-       :node (rand-taken-node config)}))
+        ; Remove a validator
+        1/5 (let [v (rand-validator config)]
+              {:type :remove
+               :version (:version config)
+               :pub_key (:pub_key v)})
+
+        ; Adjust a node's weight
+        0/5 (let [v (rand-validator config)]
+              {:type    :alter-votes
+               :version (:version config)
+               :pub_key (:pub_key v)
+               :votes   (max 1 (+ (:votes v) (- (rand-int 11) 5)))}))
+
+      ; We rolled an impossible transition; try again
+      (recur test config)))
 
 (defn rand-legal-transition
   "Generates a random transition on the given config which results in a legal

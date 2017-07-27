@@ -236,13 +236,6 @@
       (assert (= :transition (:f op)))
       (let [t (:value op)]
         (case (:type t)
-          :alter-votes
-          (tc/validator-set-cas!
-            (rand-nth (:nodes test))
-            (:version t)
-            (:data (:pub_key t))
-            (:votes t))
-
           :add
           (tc/validator-set-cas!
             (rand-nth (:nodes test))
@@ -257,11 +250,26 @@
             (:data (:pub_key t))
             0)
 
+          :alter-votes
+          (tc/validator-set-cas!
+            (rand-nth (:nodes test))
+            (:version t)
+            (:data (:pub_key t))
+            (:votes t))
+
+          :create
+          (c/on-nodes test (list (:node t))
+                      (fn create [test node]
+                        (td/write-validator! (:validator t))
+                        (td/start! test node)))
+
           :destroy
           (c/on-nodes test (list (:node t))
                       (fn destroy [test node]
                         (td/stop! test node)
-                        (td/reset-node! test node))))
+                        (td/reset-node! test node)))
+
+          :stop nil)
 
         ; After we've executed an operation, we need to update our test state to
         ; reflect the new state of things.
