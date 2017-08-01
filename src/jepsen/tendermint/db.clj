@@ -124,7 +124,6 @@
   "Files required for a validator's state."
   (map (partial str base-dir "/")
        ["data"
-        "genesis.json"
         "jepsen"
         "priv_validator.json"
         "priv_validator.json.bak"]))

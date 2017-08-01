@@ -92,7 +92,6 @@
                                    :path  (encode-query-param path)
                                    :prove false})))
 
-
 ; Merkleeyes-specific paths
 
 (defn nonce
@@ -181,3 +180,18 @@
     (if (= res "")
       nil
       (f/read (hex->byte-buf res)))))
+
+(defn with-any-node
+  "Takes a test, a function taking a node as its first argument, and remaining
+  args to that function. Makes the request to various nodes until one
+  connects."
+  [test f & args]
+  (reduce (fn [_ node]
+            (try
+              (reduced (apply f node args))
+              (catch java.net.ConnectException e
+                (condp re-find (.getMessage e)
+                  #"Connection refused" nil
+                  (throw e)))))
+          nil
+          (shuffle (:nodes test))))

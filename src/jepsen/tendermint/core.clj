@@ -233,49 +233,49 @@
     (setup! [this test _] this)
 
     (invoke! [this test op]
-      (assert (= :transition (:f op)))
-      (let [t (:value op)]
-        (case (:type t)
-          :add
-          (tc/validator-set-cas!
-            (rand-nth (:nodes test))
-            (:version t)
-            (:data (:pub_key (:validator t)))
-            (:votes (:validator t)))
+      (if (= :stop (:f op))
+        nil
+        (do (assert (= :transition (:f op)))
+            (let [t (:value op)]
+              (case (:type t)
+                :add
+                (tc/with-any-node test
+                  tc/validator-set-cas!
+                  (:version t)
+                  (:data (:pub_key (:validator t)))
+                  (:votes (:validator t)))
 
-          :remove
-          (tc/validator-set-cas!
-            (rand-nth (:nodes test))
-            (:version t)
-            (:data (:pub_key t))
-            0)
+                :remove
+                (tc/with-any-node test
+                  tc/validator-set-cas!
+                  (:version t)
+                  (:data (:pub_key t))
+                  0)
 
-          :alter-votes
-          (tc/validator-set-cas!
-            (rand-nth (:nodes test))
-            (:version t)
-            (:data (:pub_key t))
-            (:votes t))
+                :alter-votes
+                (tc/with-any-node test
+                  tc/validator-set-cas!
+                  (:version t)
+                  (:data (:pub_key t))
+                  (:votes t))
 
-          :create
-          (c/on-nodes test (list (:node t))
-                      (fn create [test node]
-                        (td/write-validator! (:validator t))
-                        (td/start! test node)))
+                :create
+                (c/on-nodes test (list (:node t))
+                            (fn create [test node]
+                              (td/write-validator! (:validator t))
+                              (td/start! test node)))
 
-          :destroy
-          (c/on-nodes test (list (:node t))
-                      (fn destroy [test node]
-                        (td/stop! test node)
-                        (td/reset-node! test node)))
+                :destroy
+                (c/on-nodes test (list (:node t))
+                            (fn destroy [test node]
+                              (td/stop! test node)
+                              (td/reset-node! test node))))
 
-          :stop nil)
+              ; After we've executed an operation, we need to update our test
+              ; state to reflect the new state of things.
+              (swap! (:validator-config test) #(tv/step % t)))))
 
-        ; After we've executed an operation, we need to update our test state to
-        ; reflect the new state of things.
-        (swap! (:validator-config test) #(tv/step % t)))
-
-      op)
+            (assoc op :value :done))
 
     (teardown! [this test])))
 
