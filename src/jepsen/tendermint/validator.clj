@@ -505,8 +505,9 @@
 (defn rand-free-node
   "Selects a random node which isn't running anything."
   [config]
-  (rand-nth (vec (set/difference (:node-set config)
-                                 (set (keys (:nodes config)))))))
+  (when-let [candidates (seq (set/difference (:node-set config)
+                                             (set (keys (:nodes config)))))]
+    (rand-nth candidates)))
 
 (t/ann rand-taken-node [Config -> (t/Option Node)])
 (defn rand-taken-node
@@ -520,35 +521,35 @@
   [test config]
   (or (condp <= (rand)
         ; Create a new instance of a validator on a node.
-        ;4/5 (let [v (rand-validator config)
-        ;          n (rand-free-node config)]
-        ;      (when (and v n)
-        ;        {:type      :create
-        ;         :node      n
-        ;         :validator v}))
+        4/5 (let [v (rand-validator config)
+                  n (rand-free-node config)]
+              (when (and v n)
+                {:type      :create
+                 :node      n
+                 :validator v}))
 
         ;; Nuke a node
-        ;3/5 (when-let [node (rand-taken-node config)]
-        ;      {:type :destroy
-        ;       :node node})
+        3/5 (when-let [node (rand-taken-node config)]
+              {:type :destroy
+               :node node})
 
         ;; Create a new validator
-        ;2/5 (let [v (-> (c/on-nodes test
-        ;                            [(rand-nth (:nodes test))]
-        ;                            (t/fn [test :- Test, node :- Node]
-        ;                              (gen-validator)))
-        ;                first
-        ;                val
-        ;                (assoc :votes 2))]
-        ;      {:type      :add
-        ;       :version   (:version config)
-        ;       :validator v})
+        2/5 (let [v (-> (c/on-nodes test
+                                    [(rand-nth (:nodes test))]
+                                    (t/fn [test :- Test, node :- Node]
+                                      (gen-validator)))
+                        first
+                        val
+                        (assoc :votes 2))]
+              {:type      :add
+               :version   (:version config)
+               :validator v})
 
         ;; Remove a validator
-        ;1/5 (let [v (rand-validator config)]
-        ;      {:type :remove
-        ;       :version (:version config)
-        ;       :pub_key (:pub_key v)})
+        1/5 (let [v (rand-validator config)]
+              {:type :remove
+               :version (:version config)
+               :pub_key (:pub_key v)})
 
         ; Adjust a node's weight
         0/5 (let [v (rand-validator config)]
