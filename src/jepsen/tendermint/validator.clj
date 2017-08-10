@@ -32,40 +32,6 @@
   `(t/fn [k# :- ~K] :- (t/Option ~V)
      (get ~m k#)))
 
-; External types
-
-(t/ann jepsen.control/*dir* String)
-(t/ann jepsen.tendermint.util/base-dir String)
-
-(t/ann ^:no-check clojure.core/update
-       (t/All [m k v v' arg ...]
-              (t/IFn
-                [m k [v arg ... arg -> v'] arg ... arg -> (t/Assoc m k v')])))
-
-(t/ann ^:no-check clojure.tools.logging/*logger-factory* LoggerFactory)
-
-(t/ann ^:no-check clojure.tools.logging.impl/get-logger
-       [LoggerFactory (t/U clojure.lang.Symbol Namespace)
-              -> clojure.tools.logging.impl.Logger])
-
-(t/ann ^:no-check clojure.tools.logging.impl/enabled?
-       [Logger t/Keyword -> Boolean])
-
-(t/ann ^:no-check clojure.tools.logging/log*
-       [Logger t/Keyword (t/U Throwable nil) String -> nil])
-
-(t/ann ^:no-check jepsen.util/map-vals
-       (t/All [k v1 v2]
-              [[v1 -> v2] (t/Map k v1) -> (t/Map k v2)]))
-
-(t/ann ^:no-check jepsen.control/on-nodes
-       (t/All [res]
-              (t/IFn [Test [Test Node -> res]
-                      -> (t/Map Node res)]
-                     [Test (t/NonEmptyColl Node) [Test Node -> res]
-                      -> (t/I (t/Map Node res)
-                              (t/NonEmptySeqable
-                                (clojure.lang.AMapEntry Node res)))])))
 
 ; Domain types
 
@@ -106,12 +72,26 @@
   "A configuration represents a definite state of the cluster: the validators
   which are a part of the cluster, what nodes are running what validators, the
   version number of the config in tendermint, the nodes that are in the test,
-  etc."
-  (HMap :mandatory {:version    Version
-                    :node-set   (t/Set Node)
-                    :nodes      (t/Map Node Key)
-                    :validators (t/Map Key Validator)
-                    :max-byzantine-vote-fraction Number}))
+  etc.
+
+  :prospective-validators is used to track validators we *try* to add to the
+  cluster, but which haven't *actually* been added yet."
+  (HMap :mandatory {:version                      Version
+                    :node-set                     (t/Set Node)
+                    :nodes                        (t/Map Node Key)
+                    :validators                   (t/Map Key Validator)
+                    :prospective-validators       (t/Map Key Validator)
+                    :max-byzantine-vote-fraction  Number}))
+
+(t/defalias TendermintValidator
+  "The cluster's representation of a validator."
+  (t/HMap :mandatory {:pub_key ShortKey
+                      :power   Long}))
+
+(t/defalias TendermintValidatorSet
+  "The cluster's representation of a validator set."
+  (t/HMap :mandatory {:validators (t/Coll TendermintValidator)
+                      :version     Version}))
 
 (t/defalias CreateTransition
   "Create an instance of a validator on a node"
@@ -154,6 +134,44 @@
                             RemoveTransition
                             AlterVotesTransition))
 
+; External types
+
+(t/ann jepsen.control/*dir* String)
+(t/ann jepsen.tendermint.util/base-dir String)
+
+(t/ann ^:no-check clojure.core/update
+       (t/All [m k v v' arg ...]
+              (t/IFn
+                [m k [v arg ... arg -> v'] arg ... arg -> (t/Assoc m k v')])))
+
+(t/ann ^:no-check clojure.tools.logging/*logger-factory* LoggerFactory)
+
+(t/ann ^:no-check clojure.tools.logging.impl/get-logger
+       [LoggerFactory (t/U clojure.lang.Symbol Namespace)
+              -> clojure.tools.logging.impl.Logger])
+
+(t/ann ^:no-check clojure.tools.logging.impl/enabled?
+       [Logger t/Keyword -> Boolean])
+
+(t/ann ^:no-check clojure.tools.logging/log*
+       [Logger t/Keyword (t/U Throwable nil) String -> nil])
+
+(t/ann ^:no-check jepsen.util/map-vals
+       (t/All [k v1 v2]
+              [[v1 -> v2] (t/Map k v1) -> (t/Map k v2)]))
+
+(t/ann ^:no-check jepsen.control/on-nodes
+       (t/All [res]
+              (t/IFn [Test [Test Node -> res]
+                      -> (t/Map Node res)]
+                     [Test (t/NonEmptyColl Node) [Test Node -> res]
+                      -> (t/I (t/Map Node res)
+                              (t/NonEmptySeqable
+                                (clojure.lang.AMapEntry Node res)))])))
+
+(t/ann jepsen.tendermint.client/validator-set
+       [Node -> TendermintValidatorSet])
+
 ; OK, let's begin
 
 (t/ann ^:no-check gen-validator [-> Validator])
@@ -164,30 +182,6 @@
   (c/cd base-dir
         (-> (c/exec "./tendermint" :--home base-dir :gen_validator)
             (json/parse-string true))))
-
-(t/ann compact-key [Key -> ShortKey])
-(defn compact-key
-  "A compact, lossy, human-friendly representation of a validator key."
-  [k]
-  (subs (:data k) 0 5))
-
-(t/ann compact-config [Config -> (HMap)])
-(defn compact-config
-  "Just the essentials, please. Compacts a config into a human-readable,
-  limited representation for debugging."
-  [c]
-  (info (with-out-str (pprint c)))
-  {:version (:version c)
-   :validators (->> (:validators c)
-                    (map (t/fn [pair :- (clojure.lang.AMapEntry Key Validator)]
-                           (let [k (key pair)
-                                 v (val pair)]
-                             [(compact-key k)
-                              {:votes (:votes v)}])))
-                    (into (sorted-map)))
-   :nodes (map-vals compact-key (:nodes c))
-   :max-byzantine-vote-fraction (:max-byzantine-vote-fraction c)})
-
 
 (t/ann config [(HMap :optional {:version    Version
                                 :node-set   (t/Set Node)
@@ -216,12 +210,13 @@
   the version of the validator set that the cluster knows, and a :node-set, the
   set of nodes that exist."
   [opts]
-  (merge {:validators {}
-          :nodes      {}
-          :node-set   #{}
-          :version    -1
+  (merge {:validators             {}
+          :nodes                  {}
+          :node-set               #{}
+          :version                -1
           :max-byzantine-vote-fraction 1/3}
-         opts))
+         opts
+         {:prospective-validators {}}))
 
 (t/ann initial-config [Test -> Config])
 (defn initial-config
@@ -277,6 +272,35 @@
        vals
        (map (tk :votes Validator Number))
        (reduce + 0)))
+
+(t/ann compact-key [Key -> ShortKey])
+(defn compact-key
+  "A compact, lossy, human-friendly representation of a validator key."
+  [k]
+  (subs (:data k) 0 5))
+
+(t/ann compact-config [Config -> (HMap)])
+(defn compact-config
+  "Just the essentials, please. Compacts a config into a human-readable,
+  limited representation for debugging."
+  [c]
+  {:version (:version c)
+   :total-votes (total-votes c)
+   :prospective-validators (->> (:prospective-validators c)
+                                (map (t/fn [[k v] :- '[Key Validator]]
+                                       (compact-key k)))
+                                sort)
+   :validators (->> (:validators c)
+                    (map (t/fn [pair :- (clojure.lang.AMapEntry Key Validator)]
+                           (let [k (key pair)
+                                 v (val pair)]
+                             [(compact-key k)
+                              {:votes (:votes v)}])))
+                    (into (sorted-map)))
+   :nodes (map-vals compact-key (:nodes c))
+   :max-byzantine-vote-fraction (:max-byzantine-vote-fraction c)})
+
+
 
 (t/ann vote-fractions [Config -> (t/Map Key Number)])
 (defn vote-fractions
@@ -456,11 +480,30 @@
 
 ; - Adjust the weight of a validator
 
+(t/ann pre-step [Config Transition -> Config])
+(defn pre-step
+  "Where `step` defines the consequences of an atomic transition, we don't
+  actually get to perform all transitions atomically. In particular, when we
+  create or delete a validator, we *request* that the system create or delete
+  it, but we don't actually *know* whether it will happen until the transaction
+  completes. This function transitions a configuration to that in-between
+  state."
+  [config transition]
+  (assert-valid
+    (case (:type transition)
+      :create       config
+      :destroy      config
+      :add          (let [v (:validator transition)]
+                      (assert (not (get-in config [:validators (:pub_key v)])))
+                      (assoc config :prospective-validators
+                             (assoc (:prospective-validators config)
+                                    (:pub_key v) v)))
+      :remove       config
+      :alter-votes  config)))
 
-(t/ann step [Config Transition -> Config])
-(defn step
-  "Apply a low-level state transition to a config, returning a new config.
-  Throws if the requested transition is illegal."
+(t/ann post-step [Config Transition -> Config])
+(defn post-step
+  "Complete a transition once we know it's been executed."
   [config transition]
   (assert-valid
     (case (:type transition)
@@ -478,12 +521,16 @@
       ; Add a validator to the validator set
       :add (let [v (:validator transition)]
              (assert (not (get-in config [:validators (:pub_key v)])))
-             (assoc config :validators
-                    (assoc (:validators config) (:pub_key v) v)))
+             (-> config
+                 (assoc :prospective-validators
+                        (dissoc (:prospective-validators config)
+                                (:pub_key v)))
+                 (assoc :validators
+                        (assoc (:validators config) (:pub_key v) v))))
 
       ; Remove a validator from the validator set
       :remove (assoc config :validators
-                     (dissoc (:validators config (:pub_key transition))))
+                     (dissoc (:validators config) (:pub_key transition)))
 
       ; Change the votes allocated to a validator
       :alter-votes (let [k (:pub_key transition)
@@ -494,6 +541,15 @@
                          validator' (assoc validator :votes v)
                          validators' (assoc validators k validator')]
                      (assoc config :validators validators')))))
+
+(t/ann step [Config Transition -> Config])
+(defn step
+  "Apply a low-level state transition to a config, returning a new config.
+  Throws if the requested transition is illegal."
+  [config transition]
+  (-> config
+      (pre-step transition)
+      (post-step transition)))
 
 (t/ann rand-validator [Config -> Validator])
 (defn rand-validator
@@ -572,38 +628,100 @@
     (if (<= 100 i)
       (throw (RuntimeException. (str "Unable to generate state transition from "
                                      (pr-str config)
-                                     " in less than 100 tries; aborting.")))
+                                     " in less than 100 tries; aborting."
+                                     " Last failure was:")))
       (let [t (rand-transition test config)]
         (step config t)
         t))
     (catch AssertionError e
-      (info e :invalid-transition)
       (retry (inc i)))))
 
-(t/tc-ignore
-(defn prospective-validator-by-pub-key-data
+(t/ann prospective-validator-by-short-key
+       [Config ShortKey -> (t/Option Validator)])
+(defn prospective-validator-by-short-key
   "Looks up a prospective validator by key data alone; e.g. instead of by
   {:type ...  :data ...}."
   [config pub-key-data]
-  (loop [validators (seq (vals (:prospective-validators config)))]
-    (when validators
-      (if (= pub-key-data (:data (:pub_key (first validators))))
-        (first validators)
-        (recur (next validators)))))))
-
-
-(t/ann validator-by-pub-key-data [Config ShortKey -> (t/Option Validator)])
-(defn validator-by-pub-key-data
-  "Looks up a validator by key data alone; e.g. instead of by {:type ... :data
-  ...}."
-  [config pub-key-data]
-  (t/loop [validators :- (t/Option (t/NonEmptyASeq Validator)) (seq (vals (:validators config)))]
+  (t/loop [validators :- (t/Option (t/NonEmptyASeq Validator))
+           (seq (vals (:prospective-validators config)))]
     (when validators
       (if (= pub-key-data (:data (:pub_key (first validators))))
         (first validators)
         (recur (next validators))))))
 
-(t/tc-ignore
+(t/ann validator-by-short-key [Config ShortKey -> (t/Option Validator)])
+(defn validator-by-short-key
+  "Looks up a validator by key data alone; e.g. instead of by {:type ... :data
+  ...}."
+  [config pub-key-data]
+  (t/loop [validators :- (t/Option (t/NonEmptyASeq Validator))
+           (seq (vals (:validators config)))]
+    (when validators
+      (if (= pub-key-data (:data (:pub_key (first validators))))
+        (first validators)
+        (recur (next validators))))))
+
+(t/ann tendermint-validator-set->vote-map
+       [Config TendermintValidatorSet -> (t/Map Key Long)])
+(defn tendermint-validator-set->vote-map
+  "Converts a map of tendermint short keys to tendermint validators into a
+  map of full public keys to votes."
+  [config validator-set]
+  (->> validator-set
+       :validators
+       (map (t/fn [v :- TendermintValidator]
+              (let [short-key (:pub_key v)
+                    k (or (validator-by-short-key             config short-key)
+                          (prospective-validator-by-short-key config short-key)
+                          (throw (IllegalStateException.
+                                   (str "Don't recognize cluster validator "
+                                        (pr-str v)
+                                        "; where did it come from?"))))]
+                [(:pub_key k) (:power v)])))
+       (into {})))
+
+(t/ann clear-removed-nodes [Config (t/Map Key Long) -> Config])
+(defn clear-removed-nodes
+  "Takes a config and a map of validator keys to votes, and clears out config
+  validators which no longer exist in votes map."
+  [config votes]
+  (->> (:validators config)
+       (filter (t/fn [[k v] :- '[Key Validator]]
+                 (contains? votes k)))
+       (into {})
+       (assoc config :validators)))
+
+(t/ann update-known-nodes [Config (t/Map Key Long) -> Config])
+(defn update-known-nodes
+  "Takes a config and a map of validator keys to votes, and where a key is
+  present in the vote map but is not yet a validator in the config, promotes
+  that validator from :prospective-validators to :validators in the config.
+  Also updates all votes in the config."
+  [config votes]
+  (reduce (t/fn [config :- Config, [k v] :- '[Key Long]]
+            (let [validators (:validators config)]
+              (if-let [validator (get validators k)]
+                ; We know this validator already
+                (let [validator (assoc validator :votes v)
+                      validators (assoc validators k validator)]
+                  (assoc config :validators validators))
+
+                ; Promote from prospective-validators
+                (let [prospective (:prospective-validators config)
+                      validator   (get prospective k)
+                      _           (assert validator
+                                         (str "Don't recognize validator "
+                                              k "; where did it come from?"))
+                      validator   (assoc validator :votes v)
+                      validators  (assoc validators k validator)
+                      prospective (dissoc prospective k)]
+                  (assoc config
+                         :validators              validators
+                         :prospective-validators  prospective)))))
+          config
+          votes))
+
+(t/ann current-config [Test Node -> Config])
 (defn current-config
   "Combines our internal test view of which nodes are running what validators
   with a transactional read of the current state of validator votes, producing
@@ -612,32 +730,14 @@
   ; TODO: improve node selection
   (let [local-config   @(:validator-config test)
         cluster-config (tc/validator-set node)
-        version     (:version cluster-config)
-        ; Update validator weights
-        validators' (reduce (fn [validators' cluster-validator]
-                              (let [validator (validator-by-pub-key-data
-                                                local-config
-                                                (:pub_key cluster-validator))]
-                                (if validator
-                                  ; We're updating an existing validator weight
-                                  (update validators' (:pub_key validator)
-                                          assoc
-                                          :votes (:power cluster-validator))
+        votes          (tendermint-validator-set->vote-map
+                         local-config cluster-config)]
+    (-> local-config
+        (clear-removed-nodes votes)
+        (update-known-nodes votes)
+        (assoc :version (:version cluster-config)))))
 
-                                  ; Ah, we added a validator. Promote it from
-                                  ; :prospective-validators to the current map
-                                  (let [v (prospective-validator-by-pub-key-data
-                                            local-config
-                                            (:pub_key cluster-validator))]
-                                    ; TODO: remove from prospective-validators
-                                    (assoc validators' (:pub_key v) v)))))
-                            (:validators local-config)
-                            (:validators cluster-config))
-        ; TODO: deal with removed validators
-        ]
-    (assoc local-config
-           :version version
-           :validators validators')))
+(t/tc-ignore
 
 (defn refresh-config!
   "Attempts to update the test's config with new information from the cluster.
@@ -650,6 +750,7 @@
                     (reset! (:validator-config test) c)
                     (reduced c))
                   (catch java.io.IOException e
+                    ; (info e "unable to fetch current validator set config")
                     nil)))
               nil
               (shuffle (:nodes test)))
@@ -661,7 +762,10 @@
   (reify gen/Generator
     (op [this test process]
       (try
+        (info "refreshing config")
         (let [config (refresh-config! test)]
+          (info :config-refreshed)
+          (info (with-out-str (pprint config)))
           (info (with-out-str (pprint (compact-config config))))
           {:type  :info
            :f     :transition

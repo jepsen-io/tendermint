@@ -237,6 +237,10 @@
         nil
         (do (assert (= :transition (:f op)))
             (let [t (:value op)]
+              ; Before we apply our transition, we have to move to an
+              ; intermediate config in case it crashes.
+              (swap! (:validator-config test) #(tv/pre-step % t))
+
               (case (:type t)
                 :add
                 (tc/with-any-node test
@@ -273,7 +277,7 @@
 
               ; After we've executed an operation, we need to update our test
               ; state to reflect the new state of things.
-              (swap! (:validator-config test) #(tv/step % t)))))
+              (swap! (:validator-config test) #(tv/post-step % t)))))
 
             (assoc op :value :done))
 
