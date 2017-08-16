@@ -134,43 +134,25 @@
 
      (teardown! [_ test]))))
 
-(defn dup-groups
-  "Takes a test with a :dup-validators map of nodes to the nodes they imitate,
-  and turns that into a collection of collections of nodes, each of which is
-  several nodes pretending to be the same node. Returns a map of :groups, which
-  are the aforementioned groups, :singles, those groups with only 1 node, and
-  :dups, with more than one."
-  [test]
-  (let [dv (:dup-validators test)
-        groups (->> (:nodes test)
-                    (reduce (fn [index node]
-                              (let [orig (get dv node node)
-                                    coll (get index orig #{})]
-                                (assoc index orig (conj coll node))))
-                            {})
-                    vals)]
-    {:groups  groups
-     :singles (filter #(= 1 (count %)) groups)
-     :dups    (filter #(< 1 (count %)) groups)}))
-
 (defn peekaboo-dup-validators-grudge
   "Takes a test. Returns a function which takes a collection of nodes from that
   test, and constructs a network partition (a grudge) which isolates some dups
   completely, and leaves one connected to the majority component."
   [test]
-  (let [{:keys [groups singles dups]} (dup-groups test)]
-    (fn [nodes]
-      ; Pick one random node from every group of dups to participate in the
-      ; main component, and compute the remaining complement for each dup
-      ; group.
-      (let [chosen-ones (map (comp hash-set rand-nth vec) dups)
-            exiles      (map remove chosen-ones dups)]
-        (nemesis/complete-grudge
-          (cons ; Main group
-                (set (concat (apply concat singles)
-                             (apply concat chosen-ones)))
-                ; Exiles
-                exiles))))))
+  (fn [nodes]
+    ; Pick one random node from every group of dups to participate in the
+    ; main component, and compute the remaining complement for each dup
+    ; group.
+    (let [{:keys [groups singles dups]} (tv/dup-groups
+                                          @(:validator-config test))
+          chosen-ones (map (comp hash-set rand-nth vec) dups)
+          exiles      (map remove chosen-ones dups)]
+      (nemesis/complete-grudge
+        (cons ; Main group
+              (set (concat (apply concat singles)
+                           (apply concat chosen-ones)))
+              ; Exiles
+              exiles)))))
 
 (defn split-dup-validators-grudge
   "Takes a test. Returns a function which takes a collection of nodes from that
@@ -178,9 +160,10 @@
   into n disjoint components, each having a single duplicate validator and an
   equal share of the remaining nodes."
   [test]
-  (let [{:keys [groups singles dups]} (dup-groups test)]
-    (fn [nodes]
-      (let [n (reduce max (map count dups))]
+  (fn [nodes]
+    (let [{:keys [groups singles dups]} (tv/dup-groups
+                                          @(:validator-config test))
+          n (reduce max (map count dups))]
         (->> groups
              shuffle
              (map shuffle)
@@ -190,7 +173,7 @@
                         (inc i)])
                      [[] 0])
              first
-             nemesis/complete-grudge)))))
+             nemesis/complete-grudge))))
 
 (defn crash-truncate-nemesis
   "A nemesis which kills tendermint, kills merkleeyes, truncates the merkleeyes
@@ -322,86 +305,6 @@
     :none       {:nemesis   client/noop
                  :generator gen/void}))
 
-(defn dup-validators
-  "Takes a test. Constructs a map of nodes to the nodes whose validator keys
-  they use instead of their own. If a node has no entry in the map, it
-  generates its own validator key."
-  [test]
-  (if (:dup-validators test)
-    (let [[orig & clones] (take 2 (:nodes test))]
-      (zipmap clones (repeat orig)))))
-    ; We need fewer than 1/3.
-    ; (let [[orig & clones] (take (Math/floor (/ (count (:nodes test)) 3.01))
-    ;                             (:nodes test))]
-    ;   (zipmap clones (repeat orig)))))
-
-(defn validator-weights
-  "Takes a test. Computes a map of node names to voting amounts. When
-  dup-validators are involved, allocates just shy of 2/3 votes to the
-  duplicated key, assuming there's exactly one dup key."
-  [test]
-  (let [dup-vals (:dup-validators test)]
-    (if-not (seq dup-vals)
-      ; Equal weights
-      (zipmap (:nodes test) (repeat 1))
-
-      (let [{:keys [groups singles dups]} (dup-groups test)
-            n                             (count groups)]
-        (assert (= 1 (count dups))
-                "Don't know how to handle more than one dup validator key")
-        ; For super dup validators, we want the dup validator key to have just
-        ; shy of 2/3 voting power. That means the sum of the normal nodes
-        ; weights should be just over 1/3, so that the remaining node can make
-        ; up just under 2/3rds of the votes by itself. Let a normal node's
-        ; weight be 2. Then 2(n-1) is the combined voting power of the normal
-        ; bloc. We can then choose 4(n-1) - 1 as the weight for the dup
-        ; validator. The total votes are
-        ;
-        ;    2(n-1) + 4(n-1) - 1
-        ;  = 6(n-1) - 1
-        ;
-        ; which implies a single dup node has fraction...
-        ;
-        ;    (4(n-1) - 1) / (6(n-1) - 1)
-        ;
-        ; which approaches 2/3 from 0 for n = 1 -> infinity, and if a single
-        ; regular node is added to a duplicate node, a 2/3+ majority is
-        ; available for all n >= 1.
-        ;
-        ; For regular dup validators, let an individual node have weight 2. The
-        ; total number of individual votes is 2(n-1), which should be just
-        ; larger than twice the number of dup votes, e.g:
-        ;
-        ;     2(n-1) = 2d + e
-        ;
-        ; where e is some small positive integer, and d is the number of dup
-        ; votes. Solving for d:
-        ;
-        ;     (2(n-1) - e) / 2 = d
-        ;          n - 1 - e/2 = d    ; Choose e = 2
-        ;                n - 2 = d
-        ;
-        ; The total number of votes is therefore:
-        ;
-        ;     2(n-1) + n - 2
-        ;   = 3n - 4
-        ;
-        ; So a dup validator alone has vote fraction:
-        ;
-        ;     (n - 2) / (3n - 4)
-        ;
-        ; which is always under 1/3. And with a single validator, it has vote
-        ; fraction:
-        ;
-        ;     (n - 2) + 2 / (3n - 4)
-        ;   =           n / (3n - 4)
-        ;
-        ; which is always over 1/3.
-        (merge (zipmap (apply concat singles) (repeat 2))
-               (zipmap (first dups) (repeat
-                                      (if (:super-dup-validators test)
-                                        (dec (* 4 (dec n)))
-                                        (- n 2)))))))))
 (defn deref-gen
   "Sometimes you need to build a generator not *now*, but *later*; e.g. because
   it depends on state that won't be available until the generator is actually

@@ -43,7 +43,9 @@
   "Jepsen tests have nodes and a current validator atom."
   (HMap :mandatory {:nodes            (t/NonEmptyVec  Node)
                     :validator-config (t/Atom1        Config)}
-        :optional {:max-byzantine-vote-fraction Number}))
+        :optional {:dup-validators              Boolean
+                   :max-byzantine-vote-fraction Number
+                   :super-byzantine-validators  Boolean}))
 
 (t/defalias Version
   "Tendermint cluster version numbers."
@@ -88,7 +90,8 @@
                     :nodes                        (t/Map Node Key)
                     :validators                   (t/Map Key Validator)
                     :prospective-validators       (t/Map Key Validator)
-                    :max-byzantine-vote-fraction  Number}))
+                    :max-byzantine-vote-fraction  Number
+                    :super-byzantine-validators   Boolean}))
 
 (t/defalias TendermintValidator
   "The cluster's representation of a validator."
@@ -183,12 +186,11 @@
 (t/ann ^:no-check cheshire.core/parse-string [String true ->
                                               (t/Map t/Keyword t/Any)])
 
-
 (t/ann jepsen.tendermint.client/validator-set
        [Node -> TendermintValidatorSet])
 
-; OK, let's begin
-
+; A regression in core.typed breaks occurrence typing for locals (!?), so we
+; can only convince the type system of filters using function args.
 (t/ann conform-map [t/Any -> (t/Map t/Any t/Any)])
 (defn conform-map
   [x]
@@ -201,7 +203,7 @@
   (assert (string? x))
   x)
 
-(t/ann conform-integer [t/Any -> Long])
+(t/ann conform-long [t/Any -> Long])
 (defn conform-long
   [x]
   (assert (instance? Long x))
@@ -219,8 +221,121 @@
   [x]
   (let [m (conform-map x)]
     {:address   (conform-string (:address x))
-     :pub_key   (conform-key (:pub_key x))
-     :priv_key  (conform-key (:priv_key x))}))
+     :pub_key   (conform-key    (:pub_key x))
+     :priv_key  (conform-key    (:priv_key x))}))
+
+; OK, let's begin
+
+(t/ann nodes-running-validators [Config -> (t/Map Key (t/Coll Node))])
+(defn nodes-running-validators
+  "Takes a config, yielding a map of validator keys to groups of nodes that run
+  that validator."
+  [config]
+  (->> (:nodes config)
+       (reduce (t/fn [m               :- (t/Map Key (t/Vec Node))
+                      [node pub-key]  :- '[Node Key]]
+                   (assoc m pub-key (conj (get m pub-key []) node)))
+               {})))
+
+(t/ann ^:no-check byzantine-validators [Config -> (t/Coll Validator)])
+(defn byzantine-validators
+  "A collection of all validators in the validator set which are running on
+  more than one node."
+  [config]
+  (->> (nodes-running-validators config)
+       (filter (t/fn [[key nodes] :- '[Key (t/Coll Node)]]
+                 (< 1 (count nodes))))
+       (map key)
+       (keep (tmfn (:validators config) Key Validator))))
+
+
+(t/ann initial-validator-votes [Config -> (t/Map Key Long)])
+(defn initial-validator-votes
+  "Takes a config. Computes a map of validator public keys to votes. When there
+  are byzantine validators and the config has :super-byzantine-validators
+  enabled, allocates just shy of 2/3 votes to the byzantine validator.
+  Otherwise, allocates just shy of 1/3 votes to the byzantine validator."
+  [config]
+  (if-let [bs (byzantine-validators config)]
+    (do (assert (= 1 (count bs))
+                "Only know how to deal with 1 or 0 byzantine validators")
+        (let [b (:pub_key (first bs))
+              n (count (:validators config))]
+          ; For super dup validators, we want the dup validator key to have
+          ; just shy of 2/3 voting power. That means the sum of the normal
+          ; nodes weights should be just over 1/3, so that the remaining node
+          ; can make up just under 2/3rds of the votes by itself. Let a normal
+          ; node's weight be 2. Then 2(n-1) is the combined voting power of the
+          ; normal bloc. We can then choose 4(n-1) - 1 as the weight for the
+          ; dup validator. The total votes are
+          ;
+          ;    2(n-1) + 4(n-1) - 1
+          ;  = 6(n-1) - 1
+          ;
+          ; which implies a single dup node has fraction...
+          ;
+          ;    (4(n-1) - 1) / (6(n-1) - 1)
+          ;
+          ; which approaches 2/3 from 0 for n = 1 -> infinity, and if a single
+          ; regular node is added to a duplicate node, a 2/3+ majority is
+          ; available for all n >= 1.
+          ;
+          ; For regular dup validators, let an individual node have weight 2.
+          ; The total number of individual votes is 2(n-1), which should be
+          ; just larger than twice the number of dup votes, e.g:
+          ;
+          ;     2(n-1) = 2d + e
+          ;
+          ; where e is some small positive integer, and d is the number of dup
+          ; votes. Solving for d:
+          ;
+          ;     (2(n-1) - e) / 2 = d
+          ;          n - 1 - e/2 = d    ; Choose e = 2
+          ;                n - 2 = d
+          ;
+          ; The total number of votes is therefore:
+          ;
+          ;     2(n-1) + n - 2
+          ;   = 3n - 4
+          ;
+          ; So a dup validator alone has vote fraction:
+          ;
+          ;     (n - 2) / (3n - 4)
+          ;
+          ; which is always under 1/3. And with a single validator, it has vote
+          ; fraction:
+          ;
+          ;     (n - 2) + 2 / (3n - 4)
+          ;   =           n / (3n - 4)
+          ;
+          ; which is always over 1/3.
+          (let [base-votes (zipmap (remove #{b} (keys (:validators config)))
+                                   (repeat 2))
+                byz-votes  {b (conform-long
+                                (if (:super-byzantine-validators config)
+                                  (dec (* 4 (dec n)))
+                                  (- n 2)))}]
+            (t/ann-form base-votes (t/Map Key Long))
+            (merge base-votes byz-votes))))
+
+    ; Default case: no byzantine validator, everyone has 2 votes.
+    (zipmap (keys (:validators config)) (repeat 2))))
+
+(t/ann with-initial-validator-votes [Config -> Config])
+(defn with-initial-validator-votes
+  "Takes a config, computes the correct distribution of initial validator
+  votes, and assigns those votes to validators, returning the resulting
+  config."
+  [config]
+  (let [votes (initial-validator-votes config)
+        validators (reduce (t/fn [m :- (t/Map Key Validator)
+                                  [k votes] :- '[Key Long]]
+                             (let [v (get m k)]
+                               (assert v)
+                               (assoc m k (assoc v :votes votes))))
+                           (:validators config)
+                           (initial-validator-votes config))]
+    (assoc config :validators validators)))
 
 (t/ann gen-validator [-> GenValidator])
 (defn gen-validator
@@ -243,6 +358,7 @@
                                 :node-set   (t/Set Node)
                                 :nodes      (t/Map Node Key)
                                 :validators (t/Map Key Validator)
+                                :super-byzantine-validators Boolean
                                 :max-byzantine-vote-fraction Number})
                  -> Config])
 (defn config
@@ -270,7 +386,8 @@
           :nodes                  {}
           :node-set               #{}
           :version                -1
-          :max-byzantine-vote-fraction 1/3}
+          :max-byzantine-vote-fraction 1/3
+          :super-byzantine-validators false}
          opts
          {:prospective-validators {}}))
 
@@ -279,18 +396,39 @@
   "Constructs an initial configuration for a test with a list of :nodes
   provided."
   [test]
-  (let [validators (c/with-test-nodes test
-                     (augment-gen-validator (gen-validator)))]
-    (t/ann-form validators (t/Map Node Validator))
-    (config
-      {:validators (reduce (t/fn [m         :- (t/Map Key Validator)
+  (let [; Generate a validator for every node
+        validators (c/with-test-nodes test
+                     (augment-gen-validator (gen-validator)))
+        ; Map of nodes to validators
+        nodes (map-vals (tk :pub_key Validator Key) validators)
+        ; Map of validator keys to validators
+        validators (reduce (t/fn [m         :- (t/Map Key Validator)
                                   [node v]  :- '[Node Validator]]
                              (assoc m (:pub_key v) v))
                            {}
                            validators)
-       :nodes      (map-vals (tk :pub_key Validator Key) validators)
-       :node-set   (set (:nodes test))
-       :max-byzantine-vote-fraction (:max-byzantine-vote-fraction test 1/3)})))
+
+        ; If we're working with dup validators, run the second validator on 2
+        ; nodes and drop the first.
+        [n1 n2]     (:nodes test)
+        validators  (if (:dup-validators test)
+                      (let [v1 (get nodes n1)]
+                        (assert v1)
+                        (dissoc validators v1))
+                      validators)
+        nodes       (if (:dup-validators test)
+                      (let [v2 (get validators (get nodes n2))]
+                        (assert v2)
+                        (assoc nodes n1 (:pub_key v2)))
+                      nodes)]
+    (t/ann-form validators (t/Map Key Validator))
+    (-> {:validators validators
+         :nodes      nodes
+         :node-set   (set (:nodes test))
+         :super-byzantine-validators (:super-byzantine-validators test false)
+         :max-byzantine-vote-fraction (:max-byzantine-vote-fraction test 1/3)}
+        config
+        with-initial-validator-votes)))
 
 (t/ann genesis [Config -> t/Any])
 (defn genesis
@@ -310,7 +448,7 @@
                                               first)
                                     _ (assert name)
                                     name (key name)]
-                                {:amount  2
+                                {:amount  (:votes validator)
                                  :name    name
                                  :pub_key pub-key}))))})
 
@@ -381,29 +519,6 @@
   (set/difference (set (vals (:validators config)))
                   (set (running-validators config))))
 
-(t/ann nodes-running-validators [Config -> (t/Map Key (t/Coll Node))])
-(defn nodes-running-validators
-  "Takes a config, yielding a map of validator keys to groups of nodes that run
-  that validator."
-  [config]
-  (->> (:nodes config)
-       (reduce (t/fn [m               :- (t/Map Key (t/Vec Node))
-                      [node pub-key]  :- '[Node Key]]
-                   (assoc m pub-key (conj (get m pub-key []) node)))
-               {})))
-
-(t/ann ^:no-check byzantine-validators [Config -> (t/Coll Validator)])
-(defn byzantine-validators
-  "A collection of all validators in the validator set which are running on
-  more than one node."
-  [config]
-  (->> (nodes-running-validators config)
-       (filter (t/fn [[key nodes] :- '[Key (t/Coll Node)]]
-                 (< 1 (count nodes))))
-       (map key)
-       (keep (tmfn (:validators config) Key Validator))))
-
-
 (t/ann byzantine-validator-keys [Config -> (t/Coll Key)])
 (defn byzantine-validator-keys
   "A collection of all validator keys in the validator set which are running on
@@ -426,8 +541,6 @@
     {:groups  groups
      :singles (filter (t/fn [g :- (t/Coll t/Any)] (= 1 (count g))) groups)
      :dups    (filter (t/fn [g :- (t/Coll t/Any)] (< 1 (count g))) groups)}))
-
-
 
 (t/ann at-least-one-running-validator? [Config -> Boolean])
 (defn at-least-one-running-validator?
