@@ -178,24 +178,28 @@
 (defn crash-truncate-nemesis
   "A nemesis which kills tendermint, kills merkleeyes, truncates the merkleeyes
   log, and restarts the process, on up to `fraction` of the test's nodes."
-  [test fraction]
+  [test fraction file]
   (let [faulty-nodes (take (Math/floor (* fraction (count (:nodes test))))
                            (shuffle (:nodes test)))]
     (reify client/Client
       (setup! [this test _] this)
 
       (invoke! [this test op]
-        (assert (= (:f op) :crash))
-        (c/on-nodes test faulty-nodes
-                    (fn [test node]
-                      (td/stop-tendermint! test node)
-                      (td/stop-merkleeyes! test node)
-                      (c/su
-                        (c/exec :truncate :-c :-s
-                                (str "-" (rand-int 1048576))
-                                (str base-dir "/jepsen/jepsen.db/000001.log")))
-                      (td/start-merkleeyes! test node)
-                      (td/start-tendermint! test node)))
+        (info :nemesis-got op)
+        (case (:f op)
+          :stop nil
+
+          :crash
+          (c/on-nodes test faulty-nodes
+                      (fn [test node]
+                        (td/stop-tendermint! test node)
+                        (td/stop-merkleeyes! test node)
+                        (c/su
+                          (c/exec :truncate :-c :-s
+                                  (str "-" (rand-int 1048576))
+                                  (str base-dir file)))
+                        (td/start-merkleeyes! test node)
+                        (td/start-tendermint! test node))))
         op)
 
       (teardown! [this test]
@@ -296,13 +300,17 @@
     :crash      {:nemesis (crash-nemesis)
                  :generator (gen/start-stop 15 0)}
 
-    :crash-truncate {:nemesis (nemesis/compose
-                                {#{:crash} (crash-truncate-nemesis test 1/3)
-                                 #{:stop}  nemesis/noop})
-                     :generator (->> {:type :info, :f :crash}
-                                     (gen/delay 10))}
+    :truncate-merkleeyes {:nemesis (crash-truncate-nemesis
+                                     test 1/3 "/jepsen/jepsen.db/000001.log")
+                          :generator (->> {:type :info, :f :crash}
+                                          (gen/delay 10))}
 
-    :none       {:nemesis   client/noop
+    :truncate-tendermint {:nemesis (crash-truncate-nemesis
+                                     test 1/3 "/data/cs.wal/wal")
+                          :generator (->> {:type :info, :f :crash}
+                                          (gen/delay 10))}
+
+    :none       {:nemesis   nemesis/noop
                  :generator gen/void}))
 
 (defn deref-gen
