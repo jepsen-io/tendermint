@@ -14,7 +14,9 @@ laddr = "tcp://0.0.0.0:46657"
 [p2p]
 laddr = "tcp://0.0.0.0:46656"
 seeds = ""
+flush_throttle_timeout = 10
 
 [consensus]
 timeout_commit = 10
 skip_timeout_commit = true
+peer_gossip_sleep_duration = 10
