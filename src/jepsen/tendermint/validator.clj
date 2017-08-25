@@ -256,7 +256,7 @@
   enabled, allocates just shy of 2/3 votes to the byzantine validator.
   Otherwise, allocates just shy of 1/3 votes to the byzantine validator."
   [config]
-  (if-let [bs (byzantine-validators config)]
+  (if-let [bs (seq (byzantine-validators config))]
     (do (assert (= 1 (count bs))
                 "Only know how to deal with 1 or 0 byzantine validators")
         (let [b (:pub_key (first bs))
