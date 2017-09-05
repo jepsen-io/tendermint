@@ -1,4 +1,4 @@
-(defproject jepsen.tendermint "0.1.0-SNAPSHOT"
+(defproject jepsen.tendermint "0.1.0"
   :description "Jepsen tests for the Tendermint Byzantine consensus system"
   :url "http://github.com/jepsen-io/tendermint"
   :license {:name "Apache License, version 2.0"
@@ -8,7 +8,7 @@
                  [cheshire "5.7.1"]
                  [slingshot "0.12.2"]
                  [clj-http "3.6.1"]
-                 [jepsen "0.1.6-SNAPSHOT"]]
+                 [jepsen "0.1.6"]]
   :jvm-opts ["-Xmx6g"
              "-XX:+UseConcMarkSweepGC"
              "-XX:+UseParNewGC"
